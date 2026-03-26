@@ -14,3 +14,185 @@ body {
   background: var(--background);
   font-family: 'Inter', Arial, sans-serif;
 }
+
+/* Gemini AI Widget - Uiverse "young-walrus-64" */
+.gemini-loader {
+  --color-one: #ffbf48;
+  --color-two: #be4a1d;
+  --color-three: #ffbf4780;
+  --color-four: #bf4a1d80;
+  --color-five: #ffbf4740;
+  --time-animation: 2s;
+  --size: 0.6;
+  position: relative;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  transform: scale(var(--size));
+  box-shadow:
+    0 0 25px 0 var(--color-three),
+    0 20px 50px 0 var(--color-four);
+  animation: colorize-gemini calc(var(--time-animation) * 3) ease-in-out infinite;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.gemini-loader::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  border-top: solid 1px var(--color-one);
+  border-bottom: solid 1px var(--color-two);
+  background: linear-gradient(180deg, var(--color-five), var(--color-four));
+  box-shadow:
+    inset 0 10px 10px 0 var(--color-three),
+    inset 0 -10px 10px 0 var(--color-four);
+}
+
+.gemini-loader .box {
+  width: 100px;
+  height: 100px;
+  background: linear-gradient(180deg,
+      var(--color-one) 30%,
+      var(--color-two) 70%);
+  mask: url(#clipping-gemini);
+  -webkit-mask: url(#clipping-gemini);
+}
+
+.gemini-loader svg {
+  position: absolute;
+}
+
+.gemini-loader svg #clipping-gemini {
+  filter: contrast(15);
+  animation: roundness-gemini calc(var(--time-animation) / 2) linear infinite;
+}
+
+.gemini-loader svg #clipping-gemini polygon {
+  filter: blur(7px);
+}
+
+.gemini-loader svg #clipping-gemini polygon:nth-child(1) {
+  transform-origin: 75% 25%;
+  transform: rotate(90deg);
+}
+
+.gemini-loader svg #clipping-gemini polygon:nth-child(2) {
+  transform-origin: 50% 50%;
+  animation: rotation-gemini var(--time-animation) linear infinite reverse;
+}
+
+.gemini-loader svg #clipping-gemini polygon:nth-child(3) {
+  transform-origin: 50% 60%;
+  animation: rotation-gemini var(--time-animation) linear infinite;
+  animation-delay: calc(var(--time-animation) / -3);
+}
+
+.gemini-loader svg #clipping-gemini polygon:nth-child(4) {
+  transform-origin: 40% 40%;
+  animation: rotation-gemini var(--time-animation) linear infinite reverse;
+}
+
+.gemini-loader svg #clipping-gemini polygon:nth-child(5) {
+  transform-origin: 40% 40%;
+  animation: rotation-gemini var(--time-animation) linear infinite reverse;
+  animation-delay: calc(var(--time-animation) / -2);
+}
+
+.gemini-loader svg #clipping-gemini polygon:nth-child(6) {
+  transform-origin: 60% 40%;
+  animation: rotation-gemini var(--time-animation) linear infinite;
+}
+
+.gemini-loader svg #clipping-gemini polygon:nth-child(7) {
+  transform-origin: 60% 40%;
+  animation: rotation-gemini var(--time-animation) linear infinite;
+  animation-delay: calc(var(--time-animation) / -1.5);
+}
+
+@keyframes rotation-gemini {
+  0% {
+    transform: rotate(0deg);
+  }
+
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes roundness-gemini {
+
+  0%,
+  60%,
+  100% {
+    filter: contrast(15);
+  }
+
+  20%,
+  40% {
+    filter: contrast(3);
+  }
+}
+
+@keyframes colorize-gemini {
+
+  0%,
+  100% {
+    filter: hue-rotate(0deg);
+  }
+
+  20% {
+    filter: hue-rotate(-30deg);
+  }
+
+  40% {
+    filter: hue-rotate(-60deg);
+  }
+
+  60% {
+    filter: hue-rotate(-90deg);
+  }
+
+  80% {
+    filter: hue-rotate(-45deg);
+  }
+}
+
+/* Markdown Styling (Basic Prose) */
+.prose {
+  color: inherit;
+}
+
+.prose p {
+  margin-bottom: 0.75rem;
+}
+
+.prose p:last-child {
+  margin-bottom: 0;
+}
+
+.prose strong {
+  font-weight: 800;
+}
+
+.prose ul,
+.prose ol {
+  list-style-type: disc;
+  margin-left: 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.prose li {
+  margin-bottom: 0.25rem;
+}
+
+.prose-sm {
+  font-size: 0.875rem;
+  line-height: 1.6;
+}

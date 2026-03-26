@@ -130,7 +130,7 @@ export default function Navbar() {
             )}
 
             {/* Global Notifications Toast Container */}
-            <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-3 pointer-events-none">
+            <div className="fixed bottom-24 right-6 z-[100] flex flex-col gap-3 pointer-events-none">
                 {notifications.map(n => (
                     <div key={n.id} className="bg-white border rounded-xl shadow-2xl p-4 w-80 pointer-events-auto transform transition-all duration-300 flex flex-col animate-bounce-short">
                         <div className="flex justify-between items-start mb-1">
