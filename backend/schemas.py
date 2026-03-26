@@ -46,6 +46,12 @@ class UserBase(BaseModel):
     name: str
     role: str
 
+class UserCreate(UserBase):
+    pass
+    
+class UserUpdate(BaseModel):
+    name: str
+
 class UserOut(UserBase):
     listings: List[ListingOut] = []
 

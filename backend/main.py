@@ -16,6 +16,13 @@ def startup_db_migration():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE listings ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'Available';"))
             print("Successfully migrated 'status' column on startup!")
+            
+            try:
+                conn.execute(text("ALTER PUBLICATION supabase_realtime ADD TABLE messages;"))
+                print("Enabled Live websockets. Added messages to supabase_realtime!")
+            except Exception as e:
+                print("Publication Add Note (might already exist):", e)
+                
     except Exception as e:
         print("Startup migration error:", e)
 
@@ -112,17 +119,49 @@ def get_inbox(user_id: str, db: Session = Depends(get_db)):
         thread_key = f"{m.listing_id}_{other_user}"
         
         if thread_key not in threads:
-            # Fetch listing title for context
+            # Fetch listing and user context
             listing = db.query(models.Listing).filter(models.Listing.id == m.listing_id).first()
+            other_user_obj = db.query(models.User).filter(models.User.id == other_user).first()
+            
             threads[thread_key] = {
                 "listing_id": m.listing_id,
                 "listing_title": listing.title if listing else "Deleted Property",
+                "listing_image": listing.image_urls[0] if listing and listing.image_urls else None,
                 "other_user_id": other_user,
+                "other_user_name": other_user_obj.name if other_user_obj else "User",
                 "last_message": m.content,
                 "last_message_at": m.created_at
             }
             
     return list(threads.values())
+
+@app.get("/api/users/{user_id}")
+def get_user(user_id: str, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"id": db_user.id, "name": db_user.name, "role": db_user.role}
+
+@app.post("/api/users")
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user.id).first()
+    if db_user:
+        return db_user
+    new_user = models.User(id=user.id, email=user.email, name=user.name, role=user.role)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+@app.put("/api/users/{user_id}")
+def update_user(user_id: str, update: schemas.UserUpdate, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    db_user.name = update.name
+    db.commit()
+    db.refresh(db_user)
+    return {"message": "User updated successfully"}
 
 @app.post("/api/messages", response_model=schemas.MessageOut)
 def create_message(message: schemas.MessageCreate, db: Session = Depends(get_db)):
