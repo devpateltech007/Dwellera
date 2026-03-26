@@ -139,7 +139,7 @@ export default function SearchPage() {
 
   return (
     <ProtectedRoute>
-      <div className="flex flex-col md:flex-row h-screen pt-16 mt-[-64px]">
+      <div className="flex flex-col md:flex-row w-full min-h-full md:h-full">
         
         {/* LEFT SIDEBAR: Filters (Amazon Style) */}
         <div className="w-full md:w-72 bg-white border-r flex flex-col overflow-y-auto z-10 p-5 shadow-sm">
@@ -196,7 +196,7 @@ export default function SearchPage() {
         </div>
 
         {/* MIDDLE: Scrollable Results */}
-        <div className="w-full md:w-96 bg-gray-50 flex flex-col h-full border-r z-10 relative">
+        <div className="w-full md:w-96 bg-gray-50 flex flex-col h-[500px] md:h-full border-r z-10 relative">
           <div className="p-4 border-b bg-white flex-shrink-0">
             {session && savedProperties.length > 0 && (
               <div className="mb-4 bg-gray-50 border rounded-lg p-3 shadow-sm">
@@ -262,7 +262,7 @@ export default function SearchPage() {
         </div>
 
         {/* RIGHT: Full Height Map */}
-        <div className="flex-1 h-[50vh] md:h-full relative z-0">
+        <div className="w-full h-[50vh] md:w-auto md:flex-1 md:h-full relative z-[5] order-first md:order-last border-b md:border-none shadow-sm md:shadow-none">
           
           {/* Address Search Overlay */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] w-full max-w-sm px-4">

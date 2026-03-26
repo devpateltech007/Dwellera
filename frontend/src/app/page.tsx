@@ -12,7 +12,7 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="relative flex flex-col items-center justify-center min-h-[calc(100vh-68px)] text-center p-8 overflow-hidden">
+    <div className="relative flex flex-col items-center justify-center min-h-[calc(100vh-68px)] h-full py-20 text-center px-4 md:px-8">
       
       {/* Background Image Setup */}
       <div 

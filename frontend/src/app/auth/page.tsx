@@ -8,6 +8,7 @@ export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
   const [role, setRole] = useState('buyer'); // only used for signup
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -33,15 +34,32 @@ export default function AuthPage() {
       if (error) setError(error.message);
       else router.push('/dashboard');
     } else {
-      const { error } = await supabase.auth.signUp({
+      if (!name.trim()) {
+        setError("Full Name is required for signup.");
+        setLoading(false);
+        return;
+      }
+      const { data, error } = await supabase.auth.signUp({
         email, 
         password,
         options: {
-          data: { role }
+          data: { role, full_name: name }
         }
       });
       if (error) setError(error.message);
       else {
+        // Automatically sync new Supabase user to custom backend users table
+        if (data.user) {
+          try {
+            await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/users`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: data.user.id, email, name, role })
+            });
+          } catch(e) {
+            console.error("Failed to sync user to database", e);
+          }
+        }
         setError('Signup successful! You can now log in.');
         setIsLogin(true);
       }
@@ -95,17 +113,31 @@ export default function AuthPage() {
           </div>
 
           {!isLogin && (
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-gray-700">I want to...</label>
-              <select 
-                value={role} 
-                onChange={(e) => setRole(e.target.value)}
-                className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-              >
-                <option value="buyer">Buy Properties</option>
-                <option value="seller">Sell Properties</option>
-              </select>
-            </div>
+            <>
+              <div className="space-y-1">
+                <label htmlFor="name" className="text-sm font-medium text-gray-700">Full Name</label>
+                <input 
+                  id="name"
+                  type="text" 
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent" 
+                  placeholder="John Doe"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-gray-700">I want to...</label>
+                <select 
+                  value={role} 
+                  onChange={(e) => setRole(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  <option value="buyer">Buy Properties</option>
+                  <option value="seller">Sell Properties</option>
+                </select>
+              </div>
+            </>
           )}
 
           <button 
