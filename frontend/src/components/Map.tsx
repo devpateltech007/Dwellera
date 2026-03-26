@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
@@ -14,10 +14,22 @@ const icon = L.icon({
   iconAnchor: [12, 41],
 });
 
+function AutoCenter({ listings }: { listings: any[] }) {
+  const map = useMap();
+  useEffect(() => {
+    if (listings.length > 0) {
+      const bounds = L.latLngBounds(listings.map(l => [l.location_lat, l.location_lng]));
+      map.fitBounds(bounds, { padding: [50, 50] });
+    }
+  }, [listings, map]);
+  return null;
+}
+
 export default function MapComponent({ listings = [] }: { listings: any[] }) {
   return (
     <div style={{ height: '100%', width: '100%', minHeight: '600px' }}>
       <MapContainer center={[37.7749, -122.4194]} zoom={12} style={{ height: '100%', width: '100%' }}>
+        <AutoCenter listings={listings} />
         <TileLayer
           attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
           url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"

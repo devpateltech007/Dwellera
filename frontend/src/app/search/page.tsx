@@ -11,6 +11,7 @@ const Marker = dynamic(() => import('react-leaflet').then(m => m.Marker), { ssr:
 const Popup = dynamic(() => import('react-leaflet').then(m => m.Popup), { ssr: false });
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import PropertyDetailsModal from "@/components/PropertyDetailsModal";
 
 const icon = L.icon({
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
@@ -20,48 +21,7 @@ const icon = L.icon({
   popupAnchor: [1, -34],
 });
 
-const ImageCarousel = ({ urls, title, className }: { urls: string[], title: string, className?: string }) => {
-  const [currentIndex, setCurrentIndex] = useState(0);
 
-  if (!urls || urls.length === 0) {
-    return <div className={`flex items-center justify-center bg-gray-100 text-gray-400 ${className}`}>No Image</div>;
-  }
-
-  const next = (e: React.MouseEvent) => { e.stopPropagation(); setCurrentIndex(i => (i + 1) % urls.length); };
-  const prev = (e: React.MouseEvent) => { e.stopPropagation(); setCurrentIndex(i => (i - 1 + urls.length) % urls.length); };
-
-  return (
-    <div className={`relative group overflow-hidden ${className}`}>
-      <img src={urls[currentIndex]} alt={`${title} - image ${currentIndex + 1}`} className="w-full h-full object-cover transition-all duration-300" />
-      
-      {urls.length > 1 && (
-        <>
-          <button 
-            onClick={prev} 
-            aria-label="Previous image"
-            className="absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full bg-white/90 hover:bg-white text-gray-800 shadow opacity-0 group-hover:opacity-100 transition z-10"
-          >
-            <svg aria-hidden="true" className="w-5 h-5 pr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" /></svg>
-          </button>
-          
-          <button 
-            onClick={next} 
-            aria-label="Next image"
-            className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full bg-white/90 hover:bg-white text-gray-800 shadow opacity-0 group-hover:opacity-100 transition z-10"
-          >
-            <svg aria-hidden="true" className="w-5 h-5 pl-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
-          </button>
-          
-          <div className="absolute bottom-3 left-0 right-0 flex justify-center gap-1.5 pointer-events-none z-10">
-            {urls.map((_, idx) => (
-              <div key={idx} className={`w-1.5 h-1.5 rounded-full shadow-sm transition-all duration-300 ${idx === currentIndex ? 'bg-white scale-125' : 'bg-white/60'}`} />
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  );
-};
 
 export default function SearchPage() {
   const [listings, setListings] = useState([]);
@@ -235,8 +195,12 @@ export default function SearchPage() {
                   onKeyDown={(e) => { if (e.key === 'Enter') setSelectedListing(l); }}
                   aria-label={`View details for ${l.title}`}
                 >
-                  <div className="relative">
-                    <ImageCarousel urls={l.image_urls} title={l.title} className="w-full h-48 mb-3 rounded-lg" />
+                  <div className="relative overflow-hidden rounded-lg mb-3">
+                    {l.image_urls && l.image_urls.length > 0 ? (
+                      <img src={l.image_urls[0]} alt={l.title} className="w-full h-48 object-cover hover:scale-105 transition duration-500" />
+                    ) : (
+                      <div className="w-full h-48 bg-gray-100 flex items-center justify-center text-gray-400">No Image</div>
+                    )}
                     {l.status === 'Sold' && (
                       <div className="absolute top-2 left-2 bg-red-100 text-red-800 text-xs font-bold px-2 py-1 rounded shadow-sm">
                         SOLD
@@ -319,58 +283,10 @@ export default function SearchPage() {
 
       {/* Property Details Modal */}
       {selectedListing && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 z-[9999] flex justify-center items-center p-4 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto shadow-2xl relative">
-            
-            {/* Close Button */}
-            <button 
-              onClick={() => setSelectedListing(null)}
-              aria-label="Close details modal"
-              className="absolute top-4 right-4 bg-white/80 hover:bg-white rounded-full p-2 shadow-lg hover:scale-105 transition z-50 backdrop-blur-sm"
-            >
-              <svg aria-hidden="true" className="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>
-
-            {/* Images Carousel */}
-            <ImageCarousel urls={selectedListing.image_urls} title={selectedListing.title} className="w-full h-80 bg-gray-100" />
-
-            {/* Content */}
-            <div className="p-8">
-              <div className="flex justify-between items-start mb-4">
-                <div>
-                  <h2 className="text-3xl font-bold text-gray-900 mb-2">{selectedListing.title}</h2>
-                  <div className="flex gap-4 text-sm text-gray-600 font-medium">
-                    <span className="bg-gray-100 px-3 py-1 rounded-full">{selectedListing.property_type || 'Property'}</span>
-                    <span className="bg-gray-100 text-gray-800 px-3 py-1 rounded-full">{selectedListing.bedrooms} Beds</span>
-                    <span className="bg-gray-100 text-gray-800 px-3 py-1 rounded-full">{selectedListing.bathrooms} Baths</span>
-                  </div>
-                </div>
-                <p className="text-4xl font-extrabold text-primary">${selectedListing.price.toLocaleString()}</p>
-              </div>
-
-              <div className="mt-8 mb-10">
-                <h3 className="text-xl font-bold mb-3">Description</h3>
-                <p className="text-gray-600 leading-relaxed whitespace-pre-wrap">{selectedListing.description}</p>
-              </div>
-
-              <div className="border-t pt-6 flex justify-end gap-4">
-                <button 
-                  onClick={() => setSelectedListing(null)}
-                  className="px-6 py-3 border border-gray-300 font-semibold rounded-xl hover:bg-gray-50 transition"
-                >
-                  Close
-                </button>
-                <button 
-                  onClick={() => window.location.href = `/messages?listing_id=${selectedListing.id}&receiver_id=${selectedListing.seller_id}`}
-                  className="px-8 py-3 bg-primary text-white font-bold rounded-xl shadow-md hover:bg-gray-800 transition hover:-translate-y-0.5"
-                >
-                  Contact Seller
-                </button>
-              </div>
-            </div>
-
-          </div>
-        </div>
+        <PropertyDetailsModal 
+          listing={selectedListing} 
+          onClose={() => setSelectedListing(null)} 
+        />
       )}
     </ProtectedRoute>
   );

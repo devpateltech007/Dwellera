@@ -4,12 +4,22 @@ import { useEffect, useState, useRef } from "react";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { supabase } from "@/lib/supabase";
 import ReactMarkdown from "react-markdown";
+import dynamic from 'next/dynamic';
+import PropertyDetailsModal from "@/components/PropertyDetailsModal";
+
+// Dynamically import Map to avoid SSR issues
+const MapComponent = dynamic(() => import('@/components/Map'), { 
+  ssr: false,
+  loading: () => <div className="h-full w-full bg-gray-100 animate-pulse flex items-center justify-center font-bold text-gray-400">Initializing Map Visualization...</div>
+});
 
 export default function AIPage() {
   const [session, setSession] = useState<any>(null);
   const [connected, setConnected] = useState(false);
   const [micActive, setMicActive] = useState(false);
-  const [logs, setLogs] = useState<{ role: string; text: string }[]>([]);
+  const [logs, setLogs] = useState<{ role: string; text: string; properties?: any[] }[]>([]);
+  const [foundProperties, setFoundProperties] = useState<any[]>([]);
+  const [selectedListing, setSelectedListing] = useState<any>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -23,8 +33,8 @@ export default function AIPage() {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
   }, []);
 
-  const addLog = (role: string, text: string) => {
-    setLogs((prev) => [...prev, { role, text }]);
+  const addLog = (role: string, text: string, properties?: any[]) => {
+    setLogs((prev) => [...prev, { role, text, properties }]);
   };
 
   const connectAPI = async () => {
@@ -163,13 +173,32 @@ export default function AIPage() {
 
               const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/listings?${query.toString()}`);
               const dbData = await res.json();
-              const slimData = dbData.slice(0, 5).map((x: any) => ({ id: x.id, title: x.title, price: x.price, desc: x.description, type: x.property_type }));
+              
+              // Extract data for both AI and Map
+              const mapData = dbData.slice(0, 10); // Show up to 10 on map
+              setFoundProperties(mapData);
+
+              const slimData = mapData.map((x: any) => ({ 
+                id: x.id, 
+                title: x.title, 
+                price: x.price, 
+                desc: x.description, 
+                type: x.property_type,
+                beds: x.bedrooms,
+                baths: x.bathrooms,
+                image: x.image_urls?.[0] || 'https://via.placeholder.com/400x300?text=No+Image'
+              }));
 
               responses.push({
                 id: call.id,
                 response: { result: slimData.length > 0 ? slimData : "No properties found matching those tools." }
               });
-              addLog("system", `Tool returned ${slimData.length} properties.`);
+              
+              if (slimData.length > 0) {
+                addLog("system", `I've highlighted ${slimData.length} properties on the map for you.`, mapData);
+              } else {
+                addLog("system", "No properties found matching those criteria.");
+              }
             } catch (err) {
               responses.push({ id: call.id, response: { error: "Failed to fetch." } });
             }
@@ -343,9 +372,9 @@ export default function AIPage() {
           <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-purple-400/10 blur-[120px] animate-pulse" style={{ animationDelay: '2s' }}></div>
         </div>
 
-        <div className="relative z-10 flex flex-col h-full w-full max-w-5xl mx-auto p-4 md:p-8">
-          {/* Header */}
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+        <div className="relative z-10 flex flex-col h-full w-full max-w-[1400px] mx-auto p-4 md:p-6">
+          
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
             <div>
               <h1 className="text-4xl font-black text-gray-900 flex items-center gap-3">
                 <span className="bg-clip-text">Dwellera AI</span>
@@ -374,61 +403,143 @@ export default function AIPage() {
             </div>
           </div>
 
-          {/* Main Interface */}
-          <div className="flex-1 bg-white/40 backdrop-blur-xl border border-white/40 shadow-[0_30px_100px_-20px_rgba(0,0,0,0.1)] rounded-[2.5rem] overflow-hidden flex flex-col relative z-0">
-
-            {/* Logs View */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50/50">
-              {logs.length === 0 && (
-                <div className="h-full flex flex-col items-center justify-center text-gray-400">
-                  <svg className="w-16 h-16 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
-                  <p>Connect and click the microphone to start talking.</p>
-                  <p className="text-sm mt-2 opacity-70">Example: "Find me houses under a million dollars in the database."</p>
-                </div>
-              )}
-              {logs.map((log, i) => (
-                <div key={i} className={`flex ${log.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`
-                  max-w-[85%] rounded-[1.5rem] px-5 py-3.5 shadow-sm text-sm font-medium leading-relaxed
-                  ${log.role === 'system' ? 'bg-gray-100/80 text-gray-500 mx-auto w-full text-center text-xs' : 
-                    log.role === 'user' ? 'bg-blue-600 text-white rounded-br-none ml-auto' : 'bg-white border text-gray-800 rounded-bl-none'}
-                `}>
-                  {log.role === 'gemini' ? (
-                    <div className="prose prose-sm max-w-none prose-p:leading-relaxed prose-blue prose-strong:text-blue-700">
-                      <ReactMarkdown>{log.text}</ReactMarkdown>
+          <div className="flex-1 flex flex-col lg:flex-row gap-6 h-full overflow-hidden">
+            
+            {/* Left Column: Chat Interface */}
+            <div className="flex-[4] flex flex-col bg-white/40 backdrop-blur-xl border border-white/40 shadow-[0_30px_100px_-20px_rgba(0,0,0,0.1)] rounded-[2.5rem] overflow-hidden relative z-0">
+              {/* Logs View */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50/50">
+                {logs.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-center text-gray-400 px-4">
+                    <div className="w-20 h-20 mb-6 bg-white/50 rounded-full flex items-center justify-center shadow-inner">
+                       <svg className="w-10 h-10 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
                     </div>
-                  ) : (
-                    log.text
-                  )}
-                </div>
-                </div>
-              ))}
+                    <p className="font-bold text-gray-900 mb-1">Dwellera AI Voice is Ready</p>
+                    <p className="max-w-xs text-sm">Connect and click the microphone to describe what you're looking for.</p>
+                  </div>
+                )}
+                {logs.map((log, i) => (
+                  <div key={i} className={`flex ${log.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`
+                    max-w-[85%] rounded-[1.5rem] px-5 py-3.5 shadow-sm text-sm font-medium leading-relaxed
+                    ${log.role === 'system' ? 'bg-gray-100/80 text-gray-500 mx-auto w-full text-center text-xs' : 
+                      log.role === 'user' ? 'bg-blue-600 text-white rounded-br-none ml-auto' : 'bg-white border text-gray-800 rounded-bl-none'}
+                  `}>
+                    {log.role === 'gemini' ? (
+                      <div className="prose prose-sm max-w-none prose-p:leading-relaxed prose-blue prose-strong:text-blue-700">
+                        <ReactMarkdown>{log.text}</ReactMarkdown>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <p>{log.text}</p>
+                        {log.properties && log.properties.length > 0 && (
+                          <div className="grid grid-cols-1 gap-3 mt-4">
+                            {log.properties.map((prop, idx) => (
+                              <div key={idx} className="bg-white border rounded-2xl overflow-hidden flex shadow-sm hover:shadow-md transition-shadow group cursor-pointer">
+                                <div className="w-24 h-24 flex-shrink-0 relative overflow-hidden">
+                                   <img 
+                                     src={prop.image_urls?.[0] || 'https://via.placeholder.com/100'} 
+                                     alt={prop.title}
+                                     className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                                   />
+                                </div>
+                                <div className="flex-1 p-3 flex flex-col justify-center">
+                                  <div className="flex justify-between items-start">
+                                    <h4 className="font-bold text-gray-900 text-sm line-clamp-1">{prop.title}</h4>
+                                    <p className="text-blue-600 font-black text-xs shrink-0">${prop.price.toLocaleString()}</p>
+                                  </div>
+                                  <div className="flex gap-2 mt-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
+                                    <span>{prop.bedrooms} Bed</span>
+                                    <span>•</span>
+                                    <span>{prop.property_type}</span>
+                                  </div>
+                                  
+                                  <div className="flex gap-2 mt-3">
+                                    <button 
+                                      onClick={(e) => { e.stopPropagation(); setSelectedListing(prop); }}
+                                      className="flex-1 py-1.5 bg-gray-50 text-gray-700 text-[10px] font-bold rounded-lg border hover:bg-white transition-colors"
+                                    >
+                                      View Details
+                                    </button>
+                                    <button 
+                                      onClick={(e) => { e.stopPropagation(); window.location.href = `/messages?listing_id=${prop.id || prop.listing_id}&receiver_id=${prop.seller_id}`; }}
+                                      className="flex-1 py-1.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded-lg border border-blue-100 hover:bg-blue-100 transition-colors"
+                                    >
+                                      Contact Agent
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Voice Controls */}
+              <div className="p-6 bg-white border-t flex justify-center items-center shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.05)] relative z-10">
+                {connected ? (
+                  <button
+                    onClick={micActive ? stopMic : startMic}
+                    className={`
+                      w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl
+                      ${micActive ? 'bg-red-500 scale-110 shadow-red-500/40' : 'bg-primary hover:scale-105 shadow-primary/40'}
+                   `}
+                  >
+                    {micActive ? (
+                      <div className="w-5 h-5 bg-white rounded-sm animate-pulse"></div>
+                    ) : (
+                      <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+                    )}
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2 text-gray-400 font-bold bg-gray-50 px-6 py-3 rounded-full border border-dashed border-gray-200">
+                    <div className="w-2 h-2 rounded-full bg-gray-300"></div>
+                    Initialize Interface to start
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Voice Controls */}
-            <div className="p-6 bg-white border-t flex justify-center items-center shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.05)] relative z-10">
-              {connected ? (
-                <button
-                  onClick={micActive ? stopMic : startMic}
-                  className={`
-                    w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl
-                    ${micActive ? 'bg-red-500 scale-110 shadow-red-500/40' : 'bg-primary hover:scale-105 shadow-primary/40'}
-                 `}
-                >
-                  {micActive ? (
-                    <div className="w-6 h-6 bg-white rounded-sm animate-pulse"></div>
-                  ) : (
-                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
-                  )}
-                </button>
-              ) : (
-                <p className="text-gray-400 font-medium">Connect to API to enable voice.</p>
+            {/* Right Column: Map Visualization */}
+            <div className={`flex-[5] bg-white rounded-[2.5rem] border overflow-hidden shadow-2xl relative transition-all duration-500 ${foundProperties.length > 0 ? 'opacity-100 scale-100' : 'opacity-60 scale-[0.98]'}`}>
+              <div className="absolute top-6 left-6 z-10 flex gap-2">
+                <div className="bg-white/90 backdrop-blur-md border px-4 py-2 rounded-xl shadow-lg flex items-center gap-2 transition-all">
+                  <div className={`w-3 h-3 rounded-full ${foundProperties.length > 0 ? 'bg-blue-500' : 'bg-gray-300'}`}></div>
+                  <span className="text-xs font-black uppercase text-gray-700 tracking-tighter">
+                    {foundProperties.length} Properties Located
+                  </span>
+                </div>
+              </div>
+              
+              <MapComponent listings={foundProperties} />
+
+              {foundProperties.length === 0 && (
+                <div className="absolute inset-0 bg-gray-900/5 backdrop-blur-[2px] pointer-events-none flex items-center justify-center p-12 text-center">
+                  <div className="max-w-xs space-y-2">
+                    <p className="font-black text-gray-900 text-lg">Waiting for Queries</p>
+                    <p className="text-sm text-gray-500 font-medium">Ask Gemini to search for listings to populate the geographic visualization.</p>
+                  </div>
+                </div>
               )}
             </div>
 
           </div>
 
         </div>
+
+        {/* Global Property Details Modal */}
+        {selectedListing && (
+          <PropertyDetailsModal 
+            listing={selectedListing} 
+            onClose={() => setSelectedListing(null)} 
+          />
+        )}
+
       </div>
     </ProtectedRoute>
   );
