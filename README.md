@@ -74,5 +74,19 @@ npm run dev
 ### 4. Viewing
 Open your browser and navigate to `http://localhost:3000`. You can begin by creating an account and logging in.
 
+## ☁️ Deployment (AWS)
+
+### Backend (AWS App Runner)
+1. Connect your GitHub repository to **AWS App Runner**.
+2. Set the runtime to `Python 3` or use the `Dockerfile` provided in the `/backend` folder.
+3. Configure Environment Variables: `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_KEY`.
+4. Set the port to `8000`.
+
+### Frontend (AWS Amplify)
+1. Connect your GitHub repository to **AWS Amplify**.
+2. Choose the `/frontend` directory as the app root.
+3. Amplify will automatically detect Next.js settings.
+4. Configure Environment Variables: `NEXT_PUBLIC_API_URL` (point to your App Runner URL), `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME`, etc.
+
 ---
 *Built as a showcase for modern web UI architecture.*
