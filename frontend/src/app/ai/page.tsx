@@ -17,6 +17,19 @@ export default function AIPage() {
   const [session, setSession] = useState<any>(null);
   const [connected, setConnected] = useState(false);
   const [micActive, setMicActive] = useState(false);
+  const [autoNegotiatorEnabled, setAutoNegotiatorEnabled] = useState(true);
+  const [showPrefModal, setShowPrefModal] = useState(false);
+  const [prefSaving, setPrefSaving] = useState(false);
+  const [prefs, setPrefs] = useState({
+    budget: "",
+    city: "",
+    area: "",
+    min_bedrooms: "2",
+    min_bathrooms: "2",
+    max_budget: "",
+    property_type: "House",
+    notes: ""
+  });
   const [logs, setLogs] = useState<{ role: string; text: string; properties?: any[] }[]>([]);
   const [foundProperties, setFoundProperties] = useState<any[]>([]);
   const [selectedListing, setSelectedListing] = useState<any>(null);
@@ -33,8 +46,115 @@ export default function AIPage() {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
   }, []);
 
+  useEffect(() => {
+    const loadAIMode = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      try {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/buyer-preferences/${session.user.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setAutoNegotiatorEnabled(Boolean(data.ai_mode_enabled));
+        }
+      } catch {}
+    };
+    loadAIMode();
+  }, []);
+
   const addLog = (role: string, text: string, properties?: any[]) => {
     setLogs((prev) => [...prev, { role, text, properties }]);
+  };
+
+  const openPreferenceModal = async () => {
+    if (!session) {
+      addLog("system", "Please sign in before changing AI negotiation mode.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/buyer-preferences/${session.user.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setPrefs({
+          budget: String(data.budget || ""),
+          city: data.city || "",
+          area: data.area || "",
+          min_bedrooms: String(data.min_bedrooms || 2),
+          min_bathrooms: String(data.min_bathrooms || 2),
+          max_budget: data.max_budget ? String(data.max_budget) : "",
+          property_type: data.property_type || "House",
+          notes: data.notes || ""
+        });
+      }
+    } catch {}
+    setShowPrefModal(true);
+  };
+
+  const toggleAutoNegotiator = async () => {
+    if (!session) {
+      addLog("system", "Please sign in before changing AI negotiation mode.");
+      return;
+    }
+    if (!autoNegotiatorEnabled) {
+      await openPreferenceModal();
+      return;
+    }
+
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/buyer-preferences/${session.user.id}/ai-mode`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || "Unable to update autopilot.");
+      setAutoNegotiatorEnabled(false);
+      addLog("system", `AI negotiation autopilot is paused. Updated ${data.updated_sessions} active session(s).`);
+    } catch {
+      addLog("system", "Could not update autopilot right now. Please try again.");
+    }
+  };
+
+  const savePreferencesAndEnable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!session) return;
+    setPrefSaving(true);
+    try {
+      const prefPayload = {
+        budget: Number(prefs.budget),
+        city: prefs.city || null,
+        area: prefs.area || null,
+        min_bedrooms: Number(prefs.min_bedrooms || 1),
+        min_bathrooms: Number(prefs.min_bathrooms || 1),
+        max_budget: prefs.max_budget ? Number(prefs.max_budget) : null,
+        property_type: prefs.property_type || null,
+        notes: prefs.notes || "",
+        ai_mode_enabled: true
+      };
+      const prefRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/buyer-preferences/${session.user.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(prefPayload)
+      });
+      const prefData = await prefRes.json();
+      if (!prefRes.ok) throw new Error(prefData?.detail || "Could not save preferences.");
+
+      const autoRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/buyer-preferences/${session.user.id}/ai-mode`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true })
+      });
+      const autoData = await autoRes.json();
+      if (!autoRes.ok) throw new Error(autoData?.detail || "Unable to enable autopilot.");
+
+      setAutoNegotiatorEnabled(true);
+      setShowPrefModal(false);
+      addLog("system", `AI negotiation autopilot is on. Updated ${autoData.updated_sessions} active session(s).`);
+    } catch {
+      addLog("system", "Could not save preferences or enable autopilot. Please try again.");
+    } finally {
+      setPrefSaving(false);
+    }
   };
 
   const connectAPI = async () => {
@@ -111,6 +231,36 @@ export default function AIPage() {
                       bathrooms: { type: "INTEGER" }
                     },
                     required: ["title", "description", "price", "property_type"]
+                  }
+                },
+                {
+                  name: "start_negotiator_campaign",
+                  description: "Starts an AI negotiator campaign. Use this after the user gives budget and preferred city or area with home preferences. It finds nearby listings close to that budget and sends human sounding outreach to sellers.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      budget: { type: "NUMBER", description: "Buyer budget in USD" },
+                      city: { type: "STRING", description: "Preferred city" },
+                      area: { type: "STRING", description: "Preferred area or neighborhood" },
+                      min_bedrooms: { type: "INTEGER", description: "Minimum bedrooms needed" },
+                      min_bathrooms: { type: "INTEGER", description: "Minimum bathrooms needed" },
+                      property_type: { type: "STRING", description: "House, Apartment, Condo, or Townhouse" },
+                      radius_km: { type: "NUMBER", description: "Search radius in km, default 20" },
+                      max_candidates: { type: "INTEGER", description: "Number of seller negotiations to open" }
+                    },
+                    required: ["budget"]
+                  }
+                },
+                {
+                  name: "continue_negotiation",
+                  description: "Saves seller response into negotiation memory and generates the next human style negotiation response with a suggested offer.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      session_id: { type: "INTEGER", description: "Negotiation session id" },
+                      seller_reply: { type: "STRING", description: "Latest seller response text" }
+                    },
+                    required: ["session_id", "seller_reply"]
                   }
                 }
               ]
@@ -229,6 +379,88 @@ export default function AIPage() {
               } catch (e) {
                 responses.push({ id: call.id, response: { error: "Network error creating listing." } });
               }
+            }
+          }
+          else if (call.name === "start_negotiator_campaign") {
+            if (!session) {
+              responses.push({ id: call.id, response: { error: "User is not logged in." } });
+            } else {
+              try {
+                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/negotiator/start`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    buyer_id: session.user.id,
+                    radius_km: call.args.radius_km ?? 20,
+                    max_candidates: call.args.max_candidates ?? 5,
+                    auto_mode: autoNegotiatorEnabled,
+                    budget: call.args.budget ?? Number(prefs.budget || 0),
+                    city: call.args.city ?? prefs.city ?? null,
+                    area: call.args.area ?? prefs.area ?? null,
+                    min_bedrooms: call.args.min_bedrooms ?? Number(prefs.min_bedrooms || 1),
+                    min_bathrooms: call.args.min_bathrooms ?? Number(prefs.min_bathrooms || 1),
+                    property_type: call.args.property_type ?? prefs.property_type ?? null
+                  })
+                });
+
+                const campaignData = await res.json();
+                if (!res.ok) {
+                  responses.push({ id: call.id, response: { error: campaignData?.detail || "Failed to start negotiator campaign." } });
+                } else {
+                  const sessions = campaignData.sessions || [];
+                  responses.push({
+                    id: call.id,
+                    response: {
+                      result: sessions.length > 0
+                        ? sessions.map((s: any) => ({
+                            session_id: s.session_id,
+                            listing_id: s.listing_id,
+                            title: s.listing_title,
+                            price: s.listing_price,
+                            distance_km: s.distance_km,
+                            seller_id: s.seller_id
+                          }))
+                        : "No qualifying listings found within budget and radius."
+                    }
+                  });
+
+                  if (sessions.length > 0) {
+                    addLog("system", `Negotiator launched across ${sessions.length} seller conversations with memory enabled.`);
+                  } else {
+                    addLog("system", "Negotiator could not find matching listings near that budget and location.");
+                  }
+                }
+              } catch (err) {
+                responses.push({ id: call.id, response: { error: "Failed to start negotiator campaign." } });
+              }
+            }
+          }
+          else if (call.name === "continue_negotiation") {
+            try {
+              const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/negotiator/${call.args.session_id}/seller-reply`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ seller_reply: call.args.seller_reply })
+              });
+              const replyData = await res.json();
+              if (!res.ok) {
+                responses.push({ id: call.id, response: { error: replyData?.detail || "Failed to continue negotiation." } });
+              } else {
+                responses.push({
+                  id: call.id,
+                  response: {
+                    result: {
+                      session_id: replyData.session_id,
+                      listing_id: replyData.listing_id,
+                      suggested_offer: replyData.suggested_offer,
+                      reply: replyData.reply
+                    }
+                  }
+                });
+                addLog("system", `Negotiator memory updated for session ${replyData.session_id}.`);
+              }
+            } catch (err) {
+              responses.push({ id: call.id, response: { error: "Failed to continue negotiation." } });
             }
           }
         }
@@ -384,6 +616,17 @@ export default function AIPage() {
             </div>
 
             <div className="flex gap-3">
+              <button
+                onClick={toggleAutoNegotiator}
+                className={`px-4 py-3 rounded-2xl border font-bold text-sm transition-all ${
+                  autoNegotiatorEnabled
+                    ? "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
+                    : "bg-gray-100 text-gray-600 border-gray-200 hover:bg-gray-200"
+                }`}
+                title="Toggle AI negotiator autopilot"
+              >
+                AI Negotiation {autoNegotiatorEnabled ? "On" : "Off"}
+              </button>
               {!connected ? (
                 <button
                   onClick={connectAPI}
@@ -538,6 +781,41 @@ export default function AIPage() {
             listing={selectedListing} 
             onClose={() => setSelectedListing(null)} 
           />
+        )}
+
+        {showPrefModal && (
+          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+            <form onSubmit={savePreferencesAndEnable} className="w-full max-w-xl bg-white rounded-2xl shadow-2xl border p-6 space-y-4">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="text-xl font-extrabold text-gray-900">AI Negotiation Preferences</h3>
+                  <p className="text-sm text-gray-500">We show this every time you turn on autopilot so you can confirm before it runs.</p>
+                </div>
+                <button type="button" onClick={() => setShowPrefModal(false)} className="text-gray-500 font-bold">Close</button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input required type="number" placeholder="Budget" value={prefs.budget} onChange={(e) => setPrefs((p) => ({ ...p, budget: e.target.value }))} className="px-4 py-3 border rounded-xl" />
+                <input type="number" placeholder="Max Budget (optional)" value={prefs.max_budget} onChange={(e) => setPrefs((p) => ({ ...p, max_budget: e.target.value }))} className="px-4 py-3 border rounded-xl" />
+                <input required type="text" placeholder="Preferred City" value={prefs.city} onChange={(e) => setPrefs((p) => ({ ...p, city: e.target.value }))} className="px-4 py-3 border rounded-xl" />
+                <input type="text" placeholder="Preferred Area (optional)" value={prefs.area} onChange={(e) => setPrefs((p) => ({ ...p, area: e.target.value }))} className="px-4 py-3 border rounded-xl" />
+                <input required type="number" min="1" placeholder="Min Bedrooms" value={prefs.min_bedrooms} onChange={(e) => setPrefs((p) => ({ ...p, min_bedrooms: e.target.value }))} className="px-4 py-3 border rounded-xl" />
+                <input required type="number" min="1" placeholder="Min Bathrooms" value={prefs.min_bathrooms} onChange={(e) => setPrefs((p) => ({ ...p, min_bathrooms: e.target.value }))} className="px-4 py-3 border rounded-xl" />
+                <select value={prefs.property_type} onChange={(e) => setPrefs((p) => ({ ...p, property_type: e.target.value }))} className="px-4 py-3 border rounded-xl">
+                  <option>House</option>
+                  <option>Apartment</option>
+                  <option>Condo</option>
+                  <option>Townhouse</option>
+                </select>
+              </div>
+              <textarea value={prefs.notes} onChange={(e) => setPrefs((p) => ({ ...p, notes: e.target.value }))} placeholder="Anything else AI should consider" className="w-full px-4 py-3 border rounded-xl min-h-[90px]" />
+              <div className="flex justify-end gap-3">
+                <button type="button" onClick={() => setShowPrefModal(false)} className="px-5 py-2.5 rounded-xl border font-bold text-gray-600">Cancel</button>
+                <button disabled={prefSaving} type="submit" className="px-5 py-2.5 rounded-xl bg-primary text-white font-bold disabled:opacity-60">
+                  {prefSaving ? "Saving..." : "Save and Turn On"}
+                </button>
+              </div>
+            </form>
+          </div>
         )}
 
       </div>

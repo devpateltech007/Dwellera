@@ -1,20 +1,75 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from database import engine, get_db, Base
+from database import engine, get_db, Base, SessionLocal
 import models, schemas
+import math
+import asyncio
+import datetime
 
 from sqlalchemy import text
 
 app = FastAPI(title="Real Estate API")
+autopilot_task = None
+NEGOTIATOR_BOT_ID = "negotiator-bot"
+
+
+def ensure_negotiation_schema(target_conn):
+    statements = [
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS budget DOUBLE PRECISION DEFAULT 0;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS target_lat DOUBLE PRECISION DEFAULT 0;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS target_lng DOUBLE PRECISION DEFAULT 0;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS seller_id VARCHAR DEFAULT '';",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS auto_mode BOOLEAN DEFAULT TRUE;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS last_processed_message_id INTEGER;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS final_offer DOUBLE PRECISION;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS final_note VARCHAR DEFAULT '';",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMP;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS strategy_notes VARCHAR DEFAULT '';",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'active';",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();"
+    ]
+    for stmt in statements:
+        try:
+            target_conn.execute(text(stmt))
+        except Exception as migration_error:
+            print("Negotiation schema patch note:", migration_error)
+
+
+def ensure_buyer_preferences_schema(target_conn):
+    statements = [
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS preferred_lat DOUBLE PRECISION DEFAULT 0;",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS preferred_lng DOUBLE PRECISION DEFAULT 0;",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS city VARCHAR;",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS area VARCHAR;",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS min_bathrooms INTEGER DEFAULT 1;",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS min_bedrooms INTEGER DEFAULT 1;",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS property_type VARCHAR;",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS notes VARCHAR DEFAULT '';",
+        "ALTER TABLE buyer_preferences ADD COLUMN IF NOT EXISTS ai_mode_enabled BOOLEAN DEFAULT FALSE;"
+    ]
+    for stmt in statements:
+        try:
+            target_conn.execute(text(stmt))
+        except Exception as migration_error:
+            print("Buyer preferences schema patch note:", migration_error)
+    # If legacy columns exist with NOT NULL constraints, defaults prevent insert failures.
+    try:
+        target_conn.execute(text("ALTER TABLE buyer_preferences ALTER COLUMN preferred_lat SET DEFAULT 0;"))
+        target_conn.execute(text("ALTER TABLE buyer_preferences ALTER COLUMN preferred_lng SET DEFAULT 0;"))
+    except Exception as migration_error:
+        print("Buyer preferences default patch note:", migration_error)
 
 # Create tables and auto-migrate
 @app.on_event("startup")
 def startup_db_migration():
+    global autopilot_task
     Base.metadata.create_all(bind=engine)
     try:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE listings ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'Available';"))
+            ensure_negotiation_schema(conn)
+            ensure_buyer_preferences_schema(conn)
             print("Successfully migrated 'status' column on startup!")
             
             try:
@@ -25,6 +80,10 @@ def startup_db_migration():
                 
     except Exception as e:
         print("Startup migration error:", e)
+
+    # Keep negotiating in background even when user is away.
+    if autopilot_task is None or autopilot_task.done():
+        autopilot_task = asyncio.create_task(negotiation_autopilot_loop())
 
 app.add_middleware(
     CORSMiddleware,
@@ -170,3 +229,436 @@ def create_message(message: schemas.MessageCreate, db: Session = Depends(get_db)
     db.commit()
     db.refresh(db_message)
     return db_message
+
+
+def normalize_human_text(text: str) -> str:
+    clean = (text or "").replace("-", " ").strip()
+    return " ".join(clean.split())
+
+
+def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius = 6371.0
+    lat1_rad = math.radians(lat1)
+    lng1_rad = math.radians(lng1)
+    lat2_rad = math.radians(lat2)
+    lng2_rad = math.radians(lng2)
+    dlat = lat2_rad - lat1_rad
+    dlng = lng2_rad - lng1_rad
+    a = (math.sin(dlat / 2) ** 2) + math.cos(lat1_rad) * math.cos(lat2_rad) * (math.sin(dlng / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius * c
+
+
+def build_opening_message(listing_title: str, budget: float) -> str:
+    return normalize_human_text(
+        f"Hi, I am very interested in {listing_title}. My buying budget is around ${budget:,.0f}. "
+        "Could you share the current property condition and whether any repairs are needed? "
+        "Also, how quickly are you hoping to close this sale?"
+    )
+
+
+def build_next_negotiation_reply(listing_price: float, seller_reply: str):
+    reply_text = (seller_reply or "").lower()
+    urgency_signals = ["urgent", "quick", "asap", "moving", "relocate", "relocating", "need to sell", "fast"]
+    condition_signals = ["repair", "fix", "as is", "old", "dated", "renovation", "work needed"]
+
+    urgency_score = 1 if any(x in reply_text for x in urgency_signals) else 0
+    condition_score = 1 if any(x in reply_text for x in condition_signals) else 0
+
+    base_discount = 0.05
+    urgency_discount = 0.05 if urgency_score else 0.0
+    condition_discount = 0.06 if condition_score else 0.0
+    total_discount = min(0.18, base_discount + urgency_discount + condition_discount)
+    suggested_offer = round(listing_price * (1 - total_discount), 2)
+
+    message = (
+        f"Thanks for sharing that detail. Based on what you told me, I can move quickly and make this easy for you. "
+        f"I would like to offer ${suggested_offer:,.0f} and stay flexible on closing timeline. "
+        "If this is close for you, I can move to next steps right away."
+    )
+    return suggested_offer, normalize_human_text(message)
+
+
+def seller_accepts_offer(text: str) -> bool:
+    lowered = (text or "").lower()
+    accept_terms = [
+        "deal",
+        "accepted",
+        "i accept",
+        "works for me",
+        "let us do it",
+        "agreed",
+        "sounds good",
+        "okay we can close"
+    ]
+    return any(term in lowered for term in accept_terms)
+
+
+def process_autopilot_sessions(db: Session):
+    ensure_negotiation_schema(db)
+    sessions = (
+        db.query(models.NegotiationSession)
+        .filter(
+            models.NegotiationSession.status == "active",
+            models.NegotiationSession.auto_mode == True
+        )
+        .all()
+    )
+
+    for session in sessions:
+        latest_seller_msg = (
+            db.query(models.Message)
+            .filter(
+                models.Message.listing_id == session.listing_id,
+                models.Message.sender_id == session.seller_id,
+                models.Message.receiver_id == session.buyer_id
+            )
+            .order_by(models.Message.created_at.desc())
+            .first()
+        )
+        if not latest_seller_msg:
+            continue
+
+        if session.last_processed_message_id and latest_seller_msg.id <= session.last_processed_message_id:
+            continue
+
+        seller_text = normalize_human_text(latest_seller_msg.content)
+        db.add(models.NegotiationTurn(session_id=session.id, role="seller", content=seller_text))
+
+        if seller_accepts_offer(seller_text):
+            listing = db.query(models.Listing).filter(models.Listing.id == session.listing_id).first()
+            final_offer = session.final_offer or (listing.price if listing else session.budget)
+            session.status = "finalized"
+            session.finalized_at = datetime.datetime.utcnow()
+            session.final_note = "Seller accepted. Buyer should move forward."
+            session.last_processed_message_id = latest_seller_msg.id
+
+            final_msg = normalize_human_text(
+                f"Great news. Your deal is finalized at ${final_offer:,.0f}. "
+                "Seller accepted the terms. Please move forward with contract and due diligence steps."
+            )
+            db.add(
+                models.NegotiationTurn(
+                    session_id=session.id,
+                    role="system",
+                    content=final_msg,
+                    offer_price=final_offer
+                )
+            )
+            db.add(
+                models.Message(
+                    listing_id=session.listing_id,
+                    sender_id=NEGOTIATOR_BOT_ID,
+                    receiver_id=session.buyer_id,
+                    content=final_msg
+                )
+            )
+            continue
+
+        listing = db.query(models.Listing).filter(models.Listing.id == session.listing_id).first()
+        if not listing:
+            continue
+
+        suggested_offer, agent_reply = build_next_negotiation_reply(listing.price, seller_text)
+        suggested_offer = min(suggested_offer, session.budget)
+        session.final_offer = suggested_offer
+        session.last_processed_message_id = latest_seller_msg.id
+
+        db.add(
+            models.NegotiationTurn(
+                session_id=session.id,
+                role="agent",
+                content=agent_reply,
+                offer_price=suggested_offer
+            )
+        )
+        db.add(
+            models.Message(
+                listing_id=session.listing_id,
+                sender_id=session.buyer_id,
+                receiver_id=session.seller_id,
+                content=agent_reply
+            )
+        )
+
+    db.commit()
+
+
+async def negotiation_autopilot_loop():
+    while True:
+        db = SessionLocal()
+        try:
+            process_autopilot_sessions(db)
+        except Exception as exc:
+            db.rollback()
+            print("Negotiator autopilot loop error:", exc)
+        finally:
+            db.close()
+        await asyncio.sleep(20)
+
+
+@app.post("/api/negotiator/start", response_model=schemas.NegotiatorStartResponse)
+def start_negotiator_campaign(payload: schemas.NegotiatorStartRequest, db: Session = Depends(get_db)):
+    ensure_negotiation_schema(db)
+    budget_ceiling = payload.budget * 1.15
+    listings_query = db.query(models.Listing).filter(models.Listing.price <= budget_ceiling)
+
+    if payload.min_bedrooms is not None:
+        listings_query = listings_query.filter(models.Listing.bedrooms >= payload.min_bedrooms)
+    if payload.min_bathrooms is not None:
+        listings_query = listings_query.filter(models.Listing.bathrooms >= payload.min_bathrooms)
+    if payload.property_type:
+        listings_query = listings_query.filter(models.Listing.property_type.ilike(payload.property_type))
+
+    if payload.city:
+        listings_query = listings_query.filter(
+            models.Listing.title.ilike(f"%{payload.city}%") | models.Listing.description.ilike(f"%{payload.city}%")
+        )
+    if payload.area:
+        listings_query = listings_query.filter(
+            models.Listing.title.ilike(f"%{payload.area}%") | models.Listing.description.ilike(f"%{payload.area}%")
+        )
+
+    listings = listings_query.all()
+
+    ranked = []
+    for listing in listings:
+        if payload.location_lat is not None and payload.location_lng is not None:
+            distance_km = haversine_km(payload.location_lat, payload.location_lng, listing.location_lat, listing.location_lng)
+            if distance_km > payload.radius_km:
+                continue
+        else:
+            distance_km = 0.0
+        budget_delta = abs(listing.price - payload.budget) / max(payload.budget, 1)
+        ranked.append((listing, distance_km, budget_delta))
+
+    ranked.sort(key=lambda item: (item[2], item[1]))
+    shortlisted = ranked[:payload.max_candidates]
+
+    sessions_out = []
+    for listing, distance_km, _ in shortlisted:
+        opening_message = build_opening_message(listing.title, payload.budget)
+        session = models.NegotiationSession(
+            buyer_id=payload.buyer_id,
+            listing_id=listing.id,
+            seller_id=listing.seller_id,
+            budget=payload.budget,
+            target_lat=payload.location_lat or 0,
+            target_lng=payload.location_lng or 0,
+            auto_mode=payload.auto_mode,
+            strategy_notes="Natural human tone. Ask condition, urgency, and close with fair offer."
+        )
+        db.add(session)
+        db.flush()
+
+        db.add(models.NegotiationTurn(session_id=session.id, role="agent", content=opening_message))
+        db.add(
+            models.Message(
+                listing_id=listing.id,
+                sender_id=payload.buyer_id,
+                receiver_id=listing.seller_id,
+                content=opening_message
+            )
+        )
+
+        sessions_out.append(
+            schemas.NegotiatorSessionOut(
+                session_id=session.id,
+                listing_id=listing.id,
+                seller_id=listing.seller_id,
+                listing_title=listing.title,
+                listing_price=listing.price,
+                distance_km=round(distance_km, 2),
+                opening_message=opening_message
+            )
+        )
+
+    db.commit()
+    return schemas.NegotiatorStartResponse(sessions=sessions_out)
+
+
+@app.post("/api/negotiator/{session_id}/seller-reply", response_model=schemas.NegotiatorReplyOut)
+def continue_negotiation(session_id: int, payload: schemas.NegotiatorSellerReplyRequest, db: Session = Depends(get_db)):
+    ensure_negotiation_schema(db)
+    session = db.query(models.NegotiationSession).filter(models.NegotiationSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Negotiation session not found")
+
+    listing = db.query(models.Listing).filter(models.Listing.id == session.listing_id).first()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+
+    seller_message = normalize_human_text(payload.seller_reply)
+    db.add(models.NegotiationTurn(session_id=session_id, role="seller", content=seller_message))
+    db.add(
+        models.Message(
+            listing_id=session.listing_id,
+            sender_id=session.seller_id,
+            receiver_id=session.buyer_id,
+            content=seller_message
+        )
+    )
+
+    suggested_offer, agent_reply = build_next_negotiation_reply(listing.price, seller_message)
+    db.add(
+        models.NegotiationTurn(
+            session_id=session_id,
+            role="agent",
+            content=agent_reply,
+            offer_price=suggested_offer
+        )
+    )
+    db.add(
+        models.Message(
+            listing_id=session.listing_id,
+            sender_id=session.buyer_id,
+            receiver_id=session.seller_id,
+            content=agent_reply
+        )
+    )
+    db.commit()
+
+    turns = (
+        db.query(models.NegotiationTurn)
+        .filter(models.NegotiationTurn.session_id == session_id)
+        .order_by(models.NegotiationTurn.created_at.asc())
+        .all()
+    )
+
+    return schemas.NegotiatorReplyOut(
+        session_id=session_id,
+        listing_id=session.listing_id,
+        suggested_offer=suggested_offer,
+        reply=agent_reply,
+        turns=turns
+    )
+
+
+@app.get("/api/negotiator/{session_id}/memory", response_model=list[schemas.NegotiatorTurnOut])
+def get_negotiation_memory(session_id: int, db: Session = Depends(get_db)):
+    ensure_negotiation_schema(db)
+    session = db.query(models.NegotiationSession).filter(models.NegotiationSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Negotiation session not found")
+    turns = (
+        db.query(models.NegotiationTurn)
+        .filter(models.NegotiationTurn.session_id == session_id)
+        .order_by(models.NegotiationTurn.created_at.asc())
+        .all()
+    )
+    return turns
+
+
+@app.patch("/api/negotiator/{session_id}/autopilot")
+def update_negotiator_autopilot(
+    session_id: int,
+    payload: schemas.NegotiatorAutopilotUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    ensure_negotiation_schema(db)
+    session = db.query(models.NegotiationSession).filter(models.NegotiationSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Negotiation session not found")
+    session.auto_mode = payload.enabled
+    db.commit()
+    db.refresh(session)
+    return {"session_id": session.id, "auto_mode": session.auto_mode, "status": session.status}
+
+
+@app.patch("/api/negotiator/autopilot/buyer")
+def update_buyer_negotiator_autopilot(
+    payload: schemas.NegotiatorBuyerAutopilotUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    ensure_negotiation_schema(db)
+    sessions = (
+        db.query(models.NegotiationSession)
+        .filter(
+            models.NegotiationSession.buyer_id == payload.buyer_id,
+            models.NegotiationSession.status == "active"
+        )
+        .all()
+    )
+    for session in sessions:
+        session.auto_mode = payload.enabled
+    db.commit()
+    return {
+        "buyer_id": payload.buyer_id,
+        "auto_mode": payload.enabled,
+        "updated_sessions": len(sessions)
+    }
+
+
+@app.get("/api/buyer-preferences/{buyer_id}", response_model=schemas.BuyerPreferenceOut)
+def get_buyer_preferences(buyer_id: str, db: Session = Depends(get_db)):
+    ensure_buyer_preferences_schema(db)
+    pref = db.query(models.BuyerPreference).filter(models.BuyerPreference.buyer_id == buyer_id).first()
+    if not pref:
+        raise HTTPException(status_code=404, detail="Buyer preferences not found")
+    return pref
+
+
+@app.put("/api/buyer-preferences/{buyer_id}", response_model=schemas.BuyerPreferenceOut)
+def upsert_buyer_preferences(
+    buyer_id: str,
+    payload: schemas.BuyerPreferenceUpsert,
+    db: Session = Depends(get_db)
+):
+    ensure_buyer_preferences_schema(db)
+    pref = db.query(models.BuyerPreference).filter(models.BuyerPreference.buyer_id == buyer_id).first()
+    if not pref:
+        data = payload.model_dump()
+        pref = models.BuyerPreference(
+            buyer_id=buyer_id,
+            preferred_lat=0,
+            preferred_lng=0,
+            **data
+        )
+        db.add(pref)
+    else:
+        data = payload.model_dump()
+        pref.budget = data["budget"]
+        pref.preferred_lat = 0
+        pref.preferred_lng = 0
+        pref.city = data["city"]
+        pref.area = data["area"]
+        pref.min_bedrooms = data["min_bedrooms"]
+        pref.min_bathrooms = data["min_bathrooms"]
+        pref.max_budget = data["max_budget"]
+        pref.property_type = data["property_type"]
+        pref.notes = data["notes"] or ""
+        pref.ai_mode_enabled = data["ai_mode_enabled"]
+    db.commit()
+    db.refresh(pref)
+    return pref
+
+
+@app.patch("/api/buyer-preferences/{buyer_id}/ai-mode")
+def update_buyer_ai_mode(
+    buyer_id: str,
+    payload: schemas.BuyerAIModeUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    ensure_buyer_preferences_schema(db)
+    pref = db.query(models.BuyerPreference).filter(models.BuyerPreference.buyer_id == buyer_id).first()
+    if not pref:
+        raise HTTPException(status_code=404, detail="Buyer preferences not found")
+    pref.ai_mode_enabled = payload.enabled
+
+    active_sessions = (
+        db.query(models.NegotiationSession)
+        .filter(
+            models.NegotiationSession.buyer_id == buyer_id,
+            models.NegotiationSession.status == "active"
+        )
+        .all()
+    )
+    for session in active_sessions:
+        session.auto_mode = payload.enabled
+
+    db.commit()
+    return {
+        "buyer_id": buyer_id,
+        "ai_mode_enabled": payload.enabled,
+        "updated_sessions": len(active_sessions)
+    }
