@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from database import engine, get_db, Base, SessionLocal
@@ -6,8 +6,14 @@ import models, schemas
 import math
 import asyncio
 import datetime
+import os
+import re
+import uuid
+import cv2
+import numpy as np
+import pytesseract
 
-from sqlalchemy import text
+from sqlalchemy import text, or_
 
 app = FastAPI(title="Real Estate API")
 autopilot_task = None
@@ -70,6 +76,7 @@ def startup_db_migration():
             conn.execute(text("ALTER TABLE listings ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'Available';"))
             ensure_negotiation_schema(conn)
             ensure_buyer_preferences_schema(conn)
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token VARCHAR;"))
             print("Successfully migrated 'status' column on startup!")
             
             try:
@@ -203,11 +210,24 @@ def get_user(user_id: str, db: Session = Depends(get_db)):
 
 @app.post("/api/users")
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    require_verification = os.getenv("REQUIRE_ID_VERIFICATION", "true").lower() == "true"
+    if require_verification:
+        if not user.verification_token:
+            raise HTTPException(status_code=400, detail="Government ID verification required")
+        verify = db.query(models.UserVerification).filter(
+            models.UserVerification.verification_token == user.verification_token,
+            models.UserVerification.email == user.email
+        ).first()
+        if not verify or verify.verification_status != "verified":
+            raise HTTPException(status_code=400, detail="ID verification failed or expired")
+
     db_user = db.query(models.User).filter(models.User.id == user.id).first()
     if db_user:
         return db_user
     new_user = models.User(id=user.id, email=user.email, name=user.name, role=user.role)
     db.add(new_user)
+    if require_verification:
+        verify.user_id = user.id
     db.commit()
     db.refresh(new_user)
     return new_user
@@ -247,6 +267,63 @@ def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     a = (math.sin(dlat / 2) ** 2) + math.cos(lat1_rad) * math.cos(lat2_rad) * (math.sin(dlng / 2) ** 2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return radius * c
+
+
+def negotiator_city_search_variants(city: str) -> list[str]:
+    """Tokens for ILIKE on listing title/description (handles 'San Jose, CA' vs copy that only says 'San Jose')."""
+    raw = (city or "").strip()
+    if not raw:
+        return []
+    variants = [raw]
+    if "," in raw:
+        variants.append(raw.split(",")[0].strip())
+    stripped = re.sub(r",?\s*(CA|TX|NY|FL|WA|OR|AZ|NV|CO|UT|NM|IL|MI|GA|NC|VA|MD|DC|MA|CT|NJ|PA|OH|IN|WI|MN|IA|MO|LA|TN|KY|AL|SC|MS|AR|OK|KS|NE|SD|ND|MT|ID|WY|HI|AK|DE|RI|NH|VT|ME|WV|USA)\s*$", "", raw, flags=re.I).strip()
+    if stripped:
+        variants.append(stripped)
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in variants:
+        v = v.strip()
+        if v and v.lower() not in seen:
+            seen.add(v.lower())
+            out.append(v)
+    return out
+
+
+def negotiator_location_sql_filter(city: Optional[str], area: Optional[str]):
+    """
+    Text filter for negotiator listing search.
+
+    We no longer AND city with area in SQL. That rejected good rows (e.g. copy says
+    'San Jose' but not 'San Jose, CA', or never mentions 'Downtown'). When city is set,
+    match any city variant; optional area is only used for ranking, not as a hard filter.
+    """
+    city = (city or "").strip() or None
+    area = (area or "").strip() or None
+    if not city and not area:
+        return None
+    parts = []
+    if city:
+        for fragment in negotiator_city_search_variants(city):
+            pat = f"%{fragment}%"
+            parts.append(
+                (models.Listing.title.ilike(pat)) | (models.Listing.description.ilike(pat))
+            )
+    elif area:
+        pat = f"%{area}%"
+        parts.append((models.Listing.title.ilike(pat)) | (models.Listing.description.ilike(pat)))
+    if not parts:
+        return None
+    return or_(*parts)
+
+
+def listing_area_rank_score(listing: models.Listing, area: Optional[str]) -> int:
+    """0 if listing text mentions preferred area (or buyer did not specify area), else 1."""
+    if not area or not str(area).strip():
+        return 0
+    a = str(area).strip().lower()
+    blob = f"{listing.title or ''} {listing.description or ''}".lower()
+    return 0 if a in blob else 1
 
 
 def build_opening_message(listing_title: str, budget: float) -> str:
@@ -400,8 +477,38 @@ async def negotiation_autopilot_loop():
 @app.post("/api/negotiator/start", response_model=schemas.NegotiatorStartResponse)
 def start_negotiator_campaign(payload: schemas.NegotiatorStartRequest, db: Session = Depends(get_db)):
     ensure_negotiation_schema(db)
-    budget_ceiling = payload.budget * 1.15
-    listings_query = db.query(models.Listing).filter(models.Listing.price <= budget_ceiling)
+    target_budget = payload.budget
+    min_budget = payload.min_budget
+    max_budget = payload.max_budget
+
+    if target_budget is None and min_budget is None and max_budget is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide budget, or provide at least one of min_budget / max_budget."
+        )
+
+    if min_budget is None and target_budget is not None:
+        min_budget = max(target_budget * 0.85, 0)
+    if max_budget is None and target_budget is not None:
+        max_budget = target_budget * 1.15
+
+    if min_budget is not None and max_budget is not None and min_budget > max_budget:
+        raise HTTPException(status_code=422, detail="min_budget cannot be greater than max_budget.")
+
+    if target_budget is None:
+        if min_budget is not None and max_budget is not None:
+            target_budget = (min_budget + max_budget) / 2
+        else:
+            target_budget = max_budget if max_budget is not None else min_budget
+
+    listings_query = db.query(models.Listing)
+    if min_budget is not None:
+        listings_query = listings_query.filter(models.Listing.price >= min_budget)
+    if max_budget is not None:
+        listings_query = listings_query.filter(models.Listing.price <= max_budget)
+    listings_query = listings_query.filter(
+        or_(models.Listing.status == "Available", models.Listing.status.is_(None))
+    )
 
     if payload.min_bedrooms is not None:
         listings_query = listings_query.filter(models.Listing.bedrooms >= payload.min_bedrooms)
@@ -410,14 +517,9 @@ def start_negotiator_campaign(payload: schemas.NegotiatorStartRequest, db: Sessi
     if payload.property_type:
         listings_query = listings_query.filter(models.Listing.property_type.ilike(payload.property_type))
 
-    if payload.city:
-        listings_query = listings_query.filter(
-            models.Listing.title.ilike(f"%{payload.city}%") | models.Listing.description.ilike(f"%{payload.city}%")
-        )
-    if payload.area:
-        listings_query = listings_query.filter(
-            models.Listing.title.ilike(f"%{payload.area}%") | models.Listing.description.ilike(f"%{payload.area}%")
-        )
+    loc_filter = negotiator_location_sql_filter(payload.city, payload.area)
+    if loc_filter is not None:
+        listings_query = listings_query.filter(loc_filter)
 
     listings = listings_query.all()
 
@@ -429,20 +531,24 @@ def start_negotiator_campaign(payload: schemas.NegotiatorStartRequest, db: Sessi
                 continue
         else:
             distance_km = 0.0
-        budget_delta = abs(listing.price - payload.budget) / max(payload.budget, 1)
-        ranked.append((listing, distance_km, budget_delta))
+        budget_delta = abs(listing.price - target_budget) / max(target_budget, 1)
+        area_rank = listing_area_rank_score(listing, payload.area)
+        ranked.append((listing, distance_km, budget_delta, area_rank))
 
-    ranked.sort(key=lambda item: (item[2], item[1]))
+    if payload.area and str(payload.area).strip():
+        ranked.sort(key=lambda item: (item[3], item[2], item[1]))
+    else:
+        ranked.sort(key=lambda item: (item[2], item[1]))
     shortlisted = ranked[:payload.max_candidates]
 
     sessions_out = []
-    for listing, distance_km, _ in shortlisted:
-        opening_message = build_opening_message(listing.title, payload.budget)
+    for listing, distance_km, _, _ in shortlisted:
+        opening_message = build_opening_message(listing.title, target_budget)
         session = models.NegotiationSession(
             buyer_id=payload.buyer_id,
             listing_id=listing.id,
             seller_id=listing.seller_id,
-            budget=payload.budget,
+            budget=target_budget,
             target_lat=payload.location_lat or 0,
             target_lng=payload.location_lng or 0,
             auto_mode=payload.auto_mode,
@@ -662,3 +768,71 @@ def update_buyer_ai_mode(
         "ai_mode_enabled": payload.enabled,
         "updated_sessions": len(active_sessions)
     }
+
+
+def extract_id_fields(ocr_text: str, full_name: str):
+    clean = " ".join((ocr_text or "").split())
+    upper_text = clean.upper()
+    target_name = (full_name or "").strip().upper()
+    name_match = 1.0 if target_name and target_name in upper_text else 0.0
+    id_match = re.search(r"\b\d{4,}\b", clean)
+    id_last4 = id_match.group(0)[-4:] if id_match else None
+    if "DRIVER" in upper_text or "DL" in upper_text:
+        doc_type = "drivers_license"
+    elif "PASSPORT" in upper_text:
+        doc_type = "passport"
+    elif "IDENTITY" in upper_text or "ID" in upper_text:
+        doc_type = "government_id"
+    else:
+        doc_type = "unknown_id"
+    confidence = 0.6 + (0.25 * name_match) + (0.15 if id_last4 else 0)
+    return min(confidence, 0.99), name_match, id_last4, doc_type, clean
+
+
+@app.post("/api/id-verification/verify", response_model=schemas.IDVerificationOut)
+async def verify_government_id(
+    full_name: str = Form(...),
+    email: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    content = await file.read()
+    np_arr = np.frombuffer(content, np.uint8)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image upload")
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    ocr_text = pytesseract.image_to_string(thresh)
+
+    confidence, name_match, id_last4, doc_type, clean_text = extract_id_fields(ocr_text, full_name)
+    status = "verified" if name_match >= 1 and id_last4 else "pending_review"
+    token = str(uuid.uuid4())
+
+    store_ocr_text = os.getenv("STORE_ID_OCR_TEXT", "false").lower() == "true"
+    verification = models.UserVerification(
+        verification_token=token,
+        email=email,
+        full_name=full_name,
+        verification_status=status,
+        confidence_score=confidence,
+        extracted_name=full_name if name_match else None,
+        id_last4=id_last4,
+        doc_type=doc_type,
+        ocr_text=clean_text if store_ocr_text else None,
+        expires_at=datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+    )
+    db.add(verification)
+    db.commit()
+
+    return schemas.IDVerificationOut(
+        verification_token=token,
+        verification_status=status,
+        confidence_score=round(confidence, 2),
+        extracted_name=verification.extracted_name,
+        id_last4=id_last4,
+        doc_type=doc_type,
+        message="ID verified successfully" if status == "verified" else "ID captured, pending manual review"
+    )

@@ -95,3 +95,20 @@ class BuyerPreference(Base):
         default=datetime.datetime.utcnow,
         onupdate=datetime.datetime.utcnow
     )
+
+
+class UserVerification(Base):
+    __tablename__ = "user_verifications"
+    id = Column(Integer, primary_key=True, index=True)
+    verification_token = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, index=True, nullable=False)
+    full_name = Column(String, nullable=False)
+    verification_status = Column(String, default="pending_review")  # verified, pending_review, rejected
+    confidence_score = Column(Float, default=0)
+    extracted_name = Column(String, nullable=True)
+    id_last4 = Column(String, nullable=True)
+    doc_type = Column(String, nullable=True)
+    ocr_text = Column(String, nullable=True)
+    user_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)

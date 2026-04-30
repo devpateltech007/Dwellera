@@ -7,3 +7,7 @@ python-jose
 supabase
 pydantic
 psycopg2-binary
+python-multipart
+opencv-python-headless
+pytesseract
+Pillow

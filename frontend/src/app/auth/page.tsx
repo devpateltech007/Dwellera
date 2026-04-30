@@ -11,6 +11,10 @@ export default function AuthPage() {
   const [name, setName] = useState('');
   const [role, setRole] = useState('buyer'); // only used for signup
   const [loading, setLoading] = useState(false);
+  const [verifyingId, setVerifyingId] = useState(false);
+  const [verificationToken, setVerificationToken] = useState('');
+  const [verificationStatus, setVerificationStatus] = useState('');
+  const [idFile, setIdFile] = useState<File | null>(null);
   const [error, setError] = useState('');
   const router = useRouter();
 
@@ -39,6 +43,11 @@ export default function AuthPage() {
         setLoading(false);
         return;
       }
+      if (!verificationToken || verificationStatus !== 'verified') {
+        setError("Please complete government ID verification before signup.");
+        setLoading(false);
+        return;
+      }
       const { data, error } = await supabase.auth.signUp({
         email, 
         password,
@@ -54,7 +63,7 @@ export default function AuthPage() {
             await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/users`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: data.user.id, email, name, role })
+              body: JSON.stringify({ id: data.user.id, email, name, role, verification_token: verificationToken })
             });
           } catch(e) {
             console.error("Failed to sync user to database", e);
@@ -65,6 +74,42 @@ export default function AuthPage() {
       }
     }
     setLoading(false);
+  };
+
+  const verifyGovernmentId = async () => {
+    if (!idFile) {
+      setError("Please capture or upload your government ID image.");
+      return;
+    }
+    if (!name.trim() || !email.trim()) {
+      setError("Enter name and email before ID verification.");
+      return;
+    }
+    setVerifyingId(true);
+    setError('');
+    try {
+      const formData = new FormData();
+      formData.append("full_name", name);
+      formData.append("email", email);
+      formData.append("file", idFile);
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/id-verification/verify`, {
+        method: "POST",
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.detail || "Verification failed");
+      }
+      setVerificationToken(data.verification_token);
+      setVerificationStatus(data.verification_status);
+      if (data.verification_status !== 'verified') {
+        setError("ID captured but auto verification is pending review. Use a clearer photo.");
+      }
+    } catch (e: any) {
+      setError(e.message || "ID verification failed.");
+    } finally {
+      setVerifyingId(false);
+    }
   };
 
   return (
@@ -136,6 +181,33 @@ export default function AuthPage() {
                   <option value="buyer">Buy Properties</option>
                   <option value="seller">Sell Properties</option>
                 </select>
+              </div>
+
+              <div className="space-y-2 border rounded-md p-3 bg-gray-50">
+                <label className="text-sm font-medium text-gray-700">Government ID Verification</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={(e) => setIdFile(e.target.files?.[0] || null)}
+                  className="w-full text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={verifyGovernmentId}
+                  disabled={verifyingId || !idFile}
+                  className="w-full py-2 px-3 text-sm text-white bg-gray-800 rounded-md disabled:opacity-50"
+                >
+                  {verifyingId ? 'Verifying ID...' : 'Verify Government ID'}
+                </button>
+                {verificationStatus && (
+                  <p className={`text-xs font-medium ${verificationStatus === 'verified' ? 'text-green-600' : 'text-amber-600'}`}>
+                    Verification status: {verificationStatus}
+                  </p>
+                )}
+                <p className="text-xs text-gray-500">
+                  We only keep verification metadata by default and do not persist raw ID images.
+                </p>
               </div>
             </>
           )}

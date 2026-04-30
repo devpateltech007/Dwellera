@@ -13,6 +13,200 @@ const MapComponent = dynamic(() => import('@/components/Map'), {
   loading: () => <div className="h-full w-full bg-gray-100 animate-pulse flex items-center justify-center font-bold text-gray-400">Initializing Map Visualization...</div>
 });
 
+type BuyerPrefs = {
+  budget: string;
+  city: string;
+  area: string;
+  min_bedrooms: string;
+  min_bathrooms: string;
+  max_budget: string;
+  property_type: string;
+  notes: string;
+};
+
+const emptyPrefs = (): BuyerPrefs => ({
+  budget: "",
+  city: "",
+  area: "",
+  min_bedrooms: "2",
+  min_bathrooms: "2",
+  max_budget: "",
+  property_type: "House",
+  notes: ""
+});
+
+async function fetchBuyerPreferences(userId: string, apiBase: string): Promise<BuyerPrefs | null> {
+  try {
+    const res = await fetch(`${apiBase}/api/buyer-preferences/${userId}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      budget: String(data.budget ?? ""),
+      city: data.city || "",
+      area: data.area || "",
+      min_bedrooms: String(data.min_bedrooms ?? 2),
+      min_bathrooms: String(data.min_bathrooms ?? 2),
+      max_budget: data.max_budget ? String(data.max_budget) : "",
+      property_type: data.property_type || "House",
+      notes: data.notes || ""
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildLiveSystemInstruction(loggedIn: boolean, prefs: BuyerPrefs): string {
+  const lines = [
+    "You are Dwellera's voice and text assistant for property search, listings, and buyer negotiation.",
+    "",
+    "SAVED BUYER PROFILE (from this user's Dwellera account—use these values in tool calls unless the user clearly overrides them in this conversation):"
+  ];
+  if (!loggedIn) {
+    lines.push("- User is not signed in. Ask for budget and location before starting a negotiator campaign.");
+  } else {
+    lines.push(`- Min budget USD: ${prefs.budget?.trim() ? prefs.budget : "not saved yet"}`);
+    lines.push(`- Max budget USD: ${prefs.max_budget?.trim() ? prefs.max_budget : "not set"}`);
+    lines.push(`- City: ${prefs.city?.trim() ? prefs.city : "not saved yet"}`);
+    lines.push(`- Area / neighborhood: ${prefs.area?.trim() ? prefs.area : "not set"}`);
+    lines.push(`- Min bedrooms: ${prefs.min_bedrooms}`);
+    lines.push(`- Min bathrooms: ${prefs.min_bathrooms}`);
+    lines.push(`- Property type: ${prefs.property_type}`);
+    if (prefs.notes?.trim()) lines.push(`- Extra notes: ${prefs.notes}`);
+    lines.push("");
+    lines.push(
+      "When the user wants to start a negotiation campaign or seller outreach, call start_negotiator_campaign using the SAVED BUYER PROFILE for every parameter you can fill from it (especially min_budget and max_budget). Do not tell the user you lack access to their preferences—they are listed above. Only ask the user for fields that are genuinely missing from the profile (for example if min budget shows \"not saved yet\")."
+    );
+    lines.push(
+      "If the user confirms they want outreach with saved prefs (for example chosen max_candidates), say one brief line like you're starting—and call the tool once. Do not repeat the full parameter list in multiple paragraphs or stall with meta commentary before calling tools."
+    );
+    lines.push(
+      "When a tool response includes error text, summarize it calmly in one short message for the user. Include the suggested next steps from that error rather than blaming a vague unnamed failure."
+    );
+  }
+  lines.push("");
+  lines.push("Negotiation messaging should sound natural and human, not robotic.");
+  return lines.join("\n");
+}
+
+function resolveBudgetUSD(toolArg: unknown, prefStr: string): number | undefined {
+  if (toolArg != null && toolArg !== "") {
+    const n = Number(toolArg);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  if (prefStr && String(prefStr).trim() !== "") {
+    const n = Number(prefStr);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return undefined;
+}
+
+function resolveBudgetRange(args: any, prefs: BuyerPrefs): {
+  budget?: number;
+  minBudget?: number;
+  maxBudget?: number;
+} {
+  const argBudgetRaw = args?.budget != null ? Number(args.budget) : undefined;
+  const argBudget = Number.isFinite(argBudgetRaw) && argBudgetRaw > 0 ? argBudgetRaw : undefined;
+  const prefBudgetRaw = prefs.budget?.trim() ? Number(prefs.budget) : undefined;
+  const prefBudget = Number.isFinite(prefBudgetRaw) && prefBudgetRaw > 0 ? prefBudgetRaw : undefined;
+
+  const argMinRaw = args?.min_budget != null ? Number(args.min_budget) : undefined;
+  const argMaxRaw = args?.max_budget != null ? Number(args.max_budget) : undefined;
+  const argMin = Number.isFinite(argMinRaw) && argMinRaw > 0 ? argMinRaw : undefined;
+  const argMax = Number.isFinite(argMaxRaw) && argMaxRaw > 0 ? argMaxRaw : undefined;
+
+  const prefMaxRaw = prefs.max_budget?.trim() ? Number(prefs.max_budget) : undefined;
+  const prefMax = Number.isFinite(prefMaxRaw) && prefMaxRaw > 0 ? prefMaxRaw : undefined;
+
+  const useRangeFromArgs = argMin != null || argMax != null;
+  const useRangeFromPrefs = prefMax != null;
+
+  // Only treat saved "budget" as a minimum when user also saved max_budget.
+  const minBudget =
+    argMin ??
+    (useRangeFromArgs && argBudget != null ? argBudget : undefined) ??
+    (useRangeFromPrefs ? prefBudget : undefined);
+  const maxBudget = argMax ?? (useRangeFromPrefs ? prefMax : undefined);
+
+  // In non-range mode, keep legacy behavior: saved budget is the target budget.
+  let budget = argBudget ?? (!useRangeFromArgs ? prefBudget : undefined);
+  if (!budget && minBudget != null && maxBudget != null) budget = (minBudget + maxBudget) / 2;
+  if (!budget && maxBudget != null) budget = maxBudget;
+  if (!budget && minBudget != null) budget = minBudget;
+
+  return { budget, minBudget, maxBudget };
+}
+
+/** Turn FastAPI `detail` (string | validation array | object) into one line for logs. */
+function formatFastApiDetail(detail: unknown): string {
+  if (detail == null) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((e: { msg?: string }) => (typeof e?.msg === "string" ? e.msg : JSON.stringify(e)))
+      .filter(Boolean)
+      .join("; ");
+  }
+  if (typeof detail === "object") {
+    const m = (detail as { message?: string }).message;
+    if (typeof m === "string") return m;
+  }
+  try {
+    return JSON.stringify(detail);
+  } catch {
+    return String(detail);
+  }
+}
+
+/**
+ * Friendly copy for the chat log plus a richer string for Gemini (tool error), so replies stay helpful rather than vague.
+ */
+function negotiatorStartFailureGuide(
+  httpStatus: number,
+  detail: unknown,
+  networkError: boolean
+): { chat: string; tool: string } {
+  const apiLine = formatFastApiDetail(detail).trim();
+  const nextSteps =
+    "Suggested next steps: wait a moment and retry; open AI Negotiation and adjust budget, city, property type, or minimum beds/baths; or search the marketplace to confirm listings exist. If errors keep repeating, the API may be temporarily unavailable—try again later.";
+
+  if (networkError) {
+    const chat =
+      "Could not reach the Dwellera API. Check your internet connection and that the backend server is running, then retry.";
+    return { chat, tool: `${chat} ${nextSteps}` };
+  }
+
+  if (httpStatus === 422) {
+    const chat = apiLine
+      ? `Cannot start campaign: ${apiLine}`
+      : "Cannot start campaign: some fields look invalid. Check AI Negotiation preferences (budget, beds, baths) and retry.";
+    return { chat, tool: `${chat} ${nextSteps}` };
+  }
+
+  if (httpStatus >= 500) {
+    const chat =
+      "The server had a problem starting the campaign. This is usually temporary—wait a few seconds and retry.";
+    const extra = apiLine ? ` Server message: ${apiLine}` : "";
+    return { chat, tool: `${chat}${extra} ${nextSteps}` };
+  }
+
+  if (httpStatus === 401 || httpStatus === 403) {
+    const chat =
+      "This action could not be authorized. Sign out, sign back in, and try again.";
+    return { chat, tool: `${chat} ${nextSteps}` };
+  }
+
+  if (httpStatus === 404) {
+    const chat =
+      "The negotiator endpoint was not found. Confirm the backend is deployed and NEXT_PUBLIC_API_URL points to it.";
+    return { chat, tool: `${chat} ${nextSteps}` };
+  }
+
+  const chat =
+    apiLine || `Campaign could not start (request failed${httpStatus ? `, HTTP ${httpStatus}` : ""}).`;
+  return { chat, tool: `${chat} ${nextSteps}` };
+}
+
 export default function AIPage() {
   const [session, setSession] = useState<any>(null);
   const [connected, setConnected] = useState(false);
@@ -20,17 +214,10 @@ export default function AIPage() {
   const [autoNegotiatorEnabled, setAutoNegotiatorEnabled] = useState(true);
   const [showPrefModal, setShowPrefModal] = useState(false);
   const [prefSaving, setPrefSaving] = useState(false);
-  const [prefs, setPrefs] = useState({
-    budget: "",
-    city: "",
-    area: "",
-    min_bedrooms: "2",
-    min_bathrooms: "2",
-    max_budget: "",
-    property_type: "House",
-    notes: ""
-  });
+  const [prefs, setPrefs] = useState<BuyerPrefs>(() => emptyPrefs());
+  const prefsRef = useRef<BuyerPrefs>(emptyPrefs());
   const [logs, setLogs] = useState<{ role: string; text: string; properties?: any[] }[]>([]);
+  const [chatText, setChatText] = useState("");
   const [foundProperties, setFoundProperties] = useState<any[]>([]);
   const [selectedListing, setSelectedListing] = useState<any>(null);
 
@@ -47,18 +234,35 @@ export default function AIPage() {
   }, []);
 
   useEffect(() => {
-    const loadAIMode = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return;
+    prefsRef.current = prefs;
+  }, [prefs]);
+
+  useEffect(() => {
+    const loadPrefsAndAIMode = async () => {
+      const { data: { session: s } } = await supabase.auth.getSession();
+      if (!s?.user?.id) return;
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       try {
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/buyer-preferences/${session.user.id}`);
+        const res = await fetch(`${apiBase}/api/buyer-preferences/${s.user.id}`);
         if (res.ok) {
           const data = await res.json();
           setAutoNegotiatorEnabled(Boolean(data.ai_mode_enabled));
+          const next: BuyerPrefs = {
+            budget: String(data.budget ?? ""),
+            city: data.city || "",
+            area: data.area || "",
+            min_bedrooms: String(data.min_bedrooms ?? 2),
+            min_bathrooms: String(data.min_bathrooms ?? 2),
+            max_budget: data.max_budget ? String(data.max_budget) : "",
+            property_type: data.property_type || "House",
+            notes: data.notes || ""
+          };
+          setPrefs(next);
+          prefsRef.current = next;
         }
       } catch {}
     };
-    loadAIMode();
+    loadPrefsAndAIMode();
   }, []);
 
   const addLog = (role: string, text: string, properties?: any[]) => {
@@ -72,19 +276,11 @@ export default function AIPage() {
     }
 
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/buyer-preferences/${session.user.id}`);
-      if (res.ok) {
-        const data = await res.json();
-        setPrefs({
-          budget: String(data.budget || ""),
-          city: data.city || "",
-          area: data.area || "",
-          min_bedrooms: String(data.min_bedrooms || 2),
-          min_bathrooms: String(data.min_bathrooms || 2),
-          max_budget: data.max_budget ? String(data.max_budget) : "",
-          property_type: data.property_type || "House",
-          notes: data.notes || ""
-        });
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const loaded = await fetchBuyerPreferences(session.user.id, apiBase);
+      if (loaded) {
+        setPrefs(loaded);
+        prefsRef.current = loaded;
       }
     } catch {}
     setShowPrefModal(true);
@@ -164,6 +360,22 @@ export default function AIPage() {
       return;
     }
 
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const { data: { session: authSession } } = await supabase.auth.getSession();
+    if (authSession?.user) setSession(authSession);
+
+    let prefsForLive = prefsRef.current;
+    if (authSession?.user?.id) {
+      const loaded = await fetchBuyerPreferences(authSession.user.id, apiBase);
+      if (loaded) {
+        prefsForLive = loaded;
+        setPrefs(loaded);
+        prefsRef.current = loaded;
+      }
+    }
+    const systemInstructionText = buildLiveSystemInstruction(Boolean(authSession?.user), prefsForLive);
+    const toolUserId = authSession?.user?.id ?? null;
+
     // List supported models for debugging
     try {
       const listRes = await fetch(`https://generativelanguage.googleapis.com/v1alpha/models?key=${apiKey}`);
@@ -185,11 +397,19 @@ export default function AIPage() {
     ws.onopen = () => {
       setConnected(true);
       addLog("system", "Connected to Gemini Live API.");
+      if (authSession?.user?.id && prefsForLive.budget) {
+        addLog("system", "Using your saved buyer preferences for tools (budget and location are available to the AI).");
+      } else if (authSession?.user?.id) {
+        addLog("system", "Sign in OK. Save budget and city under AI Negotiation if you want the AI to start campaigns without asking.");
+      }
 
       // Send Setup Message
       const setupMsg = {
         setup: {
           model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
+          systemInstruction: {
+            parts: [{ text: systemInstructionText }]
+          },
           generationConfig: {
             responseModalities: ["AUDIO"],
             speechConfig: {
@@ -235,20 +455,26 @@ export default function AIPage() {
                 },
                 {
                   name: "start_negotiator_campaign",
-                  description: "Starts an AI negotiator campaign. Use this after the user gives budget and preferred city or area with home preferences. It finds nearby listings close to that budget and sends human sounding outreach to sellers.",
+                  description:
+                    "Starts an AI negotiator campaign: finds listings near the buyer budget and opens outreach to sellers. The user's saved profile is in your system instructions—pass those values for budget, city, beds, baths, and type whenever they are set there. Omit a parameter only when you need the user to supply it and it is missing from the profile.",
                   parameters: {
                     type: "OBJECT",
                     properties: {
-                      budget: { type: "NUMBER", description: "Buyer budget in USD" },
-                      city: { type: "STRING", description: "Preferred city" },
+                      budget: {
+                        type: "NUMBER",
+                        description:
+                          "Target budget in USD for ranking. If min_budget and max_budget are present, this can be omitted."
+                      },
+                      min_budget: { type: "NUMBER", description: "Minimum price in USD for candidate listings." },
+                      max_budget: { type: "NUMBER", description: "Maximum price in USD for candidate listings." },
+                      city: { type: "STRING", description: "Preferred city from profile or conversation" },
                       area: { type: "STRING", description: "Preferred area or neighborhood" },
                       min_bedrooms: { type: "INTEGER", description: "Minimum bedrooms needed" },
                       min_bathrooms: { type: "INTEGER", description: "Minimum bathrooms needed" },
                       property_type: { type: "STRING", description: "House, Apartment, Condo, or Townhouse" },
                       radius_km: { type: "NUMBER", description: "Search radius in km, default 20" },
                       max_candidates: { type: "INTEGER", description: "Number of seller negotiations to open" }
-                    },
-                    required: ["budget"]
+                    }
                   }
                 },
                 {
@@ -354,13 +580,13 @@ export default function AIPage() {
             }
           }
           else if (call.name === "create_listing") {
-            if (!session) {
+            if (!toolUserId) {
               responses.push({ id: call.id, response: { error: "User is not logged in." } });
             } else {
               try {
                 const payload = {
                   ...call.args,
-                  seller_id: session.user.id,
+                  seller_id: toolUserId,
                   location_lat: 37.7749, // Default backup
                   location_lng: -122.4194
                 };
@@ -382,32 +608,66 @@ export default function AIPage() {
             }
           }
           else if (call.name === "start_negotiator_campaign") {
-            if (!session) {
-              responses.push({ id: call.id, response: { error: "User is not logged in." } });
+            if (!toolUserId) {
+              const chat = "Sign in is required before starting an outreach campaign. Please sign in and try again.";
+              addLog("system", chat);
+              responses.push({ id: call.id, response: { error: chat } });
             } else {
               try {
+                const p = prefsRef.current;
+                const a = call.args || {};
+                const { budget, minBudget, maxBudget } = resolveBudgetRange(a, p);
+                if (budget == null) {
+                  const chat =
+                    "No budget range saved or provided. Open AI Negotiation, set min and max budget, save—then try again—or tell the assistant your budget range.";
+                  addLog("system", chat);
+                  responses.push({
+                    id: call.id,
+                    response: {
+                      error: `${chat} Do not insist the backend failed; prompt the user clearly to add a budget.`,
+                    },
+                  });
+                } else {
+                const city = (a.city ?? p.city)?.trim() || null;
+                const area = (a.area ?? p.area)?.trim() || null;
+                const minBed =
+                  a.min_bedrooms != null ? Number(a.min_bedrooms) : Number(p.min_bedrooms || 1);
+                const minBath =
+                  a.min_bathrooms != null ? Number(a.min_bathrooms) : Number(p.min_bathrooms || 1);
+                const propType = (a.property_type ?? p.property_type)?.trim() || null;
+
                 const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/negotiator/start`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
-                    buyer_id: session.user.id,
-                    radius_km: call.args.radius_km ?? 20,
-                    max_candidates: call.args.max_candidates ?? 5,
+                    buyer_id: toolUserId,
+                    radius_km: a.radius_km ?? 20,
+                    max_candidates: a.max_candidates ?? 5,
                     auto_mode: autoNegotiatorEnabled,
-                    budget: call.args.budget ?? Number(prefs.budget || 0),
-                    city: call.args.city ?? prefs.city ?? null,
-                    area: call.args.area ?? prefs.area ?? null,
-                    min_bedrooms: call.args.min_bedrooms ?? Number(prefs.min_bedrooms || 1),
-                    min_bathrooms: call.args.min_bathrooms ?? Number(prefs.min_bathrooms || 1),
-                    property_type: call.args.property_type ?? prefs.property_type ?? null
+                    budget,
+                    min_budget: minBudget ?? null,
+                    max_budget: maxBudget ?? null,
+                    city,
+                    area,
+                    min_bedrooms: Number.isFinite(minBed) ? minBed : null,
+                    min_bathrooms: Number.isFinite(minBath) ? minBath : null,
+                    property_type: propType
                   })
                 });
 
-                const campaignData = await res.json();
+                let campaignData: Record<string, unknown> = {};
+                try {
+                  campaignData = (await res.json()) as Record<string, unknown>;
+                } catch {
+                  campaignData = {};
+                }
+
                 if (!res.ok) {
-                  responses.push({ id: call.id, response: { error: campaignData?.detail || "Failed to start negotiator campaign." } });
+                  const { chat, tool } = negotiatorStartFailureGuide(res.status, campaignData?.detail, false);
+                  addLog("system", chat);
+                  responses.push({ id: call.id, response: { error: tool } });
                 } else {
-                  const sessions = campaignData.sessions || [];
+                  const sessions = (campaignData.sessions as unknown[]) || [];
                   responses.push({
                     id: call.id,
                     response: {
@@ -427,11 +687,17 @@ export default function AIPage() {
                   if (sessions.length > 0) {
                     addLog("system", `Negotiator launched across ${sessions.length} seller conversations with memory enabled.`);
                   } else {
-                    addLog("system", "Negotiator could not find matching listings near that budget and location.");
+                    addLog(
+                      "system",
+                      "The campaign ran, but no listings matched your filters (price under ~115% of budget, bed/bath minimums, property type, and city text on the listing). Try widening budget or property type in AI Negotiation, or search the marketplace to see what is available."
+                    );
                   }
                 }
+                }
               } catch (err) {
-                responses.push({ id: call.id, response: { error: "Failed to start negotiator campaign." } });
+                const { chat, tool } = negotiatorStartFailureGuide(0, null, true);
+                addLog("system", chat);
+                responses.push({ id: call.id, response: { error: tool } });
               }
             }
           }
@@ -479,6 +745,31 @@ export default function AIPage() {
     if (wsRef.current) {
       wsRef.current.close();
     }
+  };
+
+  const sendTextPrompt = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const trimmed = chatText.trim();
+    if (!trimmed) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      alert("Initialize the AI session first, then send a message.");
+      return;
+    }
+    addLog("user", trimmed);
+    wsRef.current.send(
+      JSON.stringify({
+        clientContent: {
+          turns: [
+            {
+              role: "user",
+              parts: [{ text: trimmed }]
+            }
+          ],
+          turnComplete: true
+        }
+      })
+    );
+    setChatText("");
   };
 
   const startMic = async () => {
@@ -723,26 +1014,60 @@ export default function AIPage() {
                 ))}
               </div>
 
-              {/* Voice Controls */}
-              <div className="p-6 bg-white border-t flex justify-center items-center shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.05)] relative z-10">
+              {/* Text + voice controls */}
+              <div className="p-6 bg-white border-t flex flex-col gap-4 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.05)] relative z-10">
                 {connected ? (
-                  <button
-                    onClick={micActive ? stopMic : startMic}
-                    className={`
-                      w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl
-                      ${micActive ? 'bg-red-500 scale-110 shadow-red-500/40' : 'bg-primary hover:scale-105 shadow-primary/40'}
-                   `}
-                  >
-                    {micActive ? (
-                      <div className="w-5 h-5 bg-white rounded-sm animate-pulse"></div>
-                    ) : (
-                      <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
-                    )}
-                  </button>
+                  <>
+                    <form
+                      onSubmit={sendTextPrompt}
+                      className="flex w-full max-w-2xl mx-auto gap-2 items-stretch"
+                    >
+                      <input
+                        type="text"
+                        value={chatText}
+                        onChange={(e) => setChatText(e.target.value)}
+                        placeholder="Type a message for the AI (search, negotiate, questions)..."
+                        aria-label="Message to AI"
+                        className="flex-1 min-w-0 px-4 py-3 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-primary focus:border-primary outline-none"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!chatText.trim()}
+                        className="px-5 py-3 rounded-xl bg-gray-900 text-white text-sm font-bold hover:bg-black disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                      >
+                        Send
+                      </button>
+                    </form>
+                    <div className="flex justify-center">
+                      <button
+                        type="button"
+                        onClick={micActive ? stopMic : startMic}
+                        className={`
+                          w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl
+                          ${micActive ? 'bg-red-500 scale-110 shadow-red-500/40' : 'bg-primary hover:scale-105 shadow-primary/40'}
+                       `}
+                        aria-label={micActive ? "Stop microphone" : "Start microphone"}
+                      >
+                        {micActive ? (
+                          <div className="w-5 h-5 bg-white rounded-sm animate-pulse"></div>
+                        ) : (
+                          <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+                        )}
+                      </button>
+                    </div>
+                  </>
                 ) : (
-                  <div className="flex items-center gap-2 text-gray-400 font-bold bg-gray-50 px-6 py-3 rounded-full border border-dashed border-gray-200">
-                    <div className="w-2 h-2 rounded-full bg-gray-300"></div>
-                    Initialize Interface to start
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="flex items-center gap-2 text-gray-400 font-bold bg-gray-50 px-6 py-3 rounded-full border border-dashed border-gray-200 w-full max-w-md justify-center">
+                      <div className="w-2 h-2 rounded-full bg-gray-300"></div>
+                      Initialize Interface to use text and voice
+                    </div>
+                    <input
+                      type="text"
+                      disabled
+                      placeholder="Connect first to type messages..."
+                      className="w-full max-w-2xl px-4 py-3 border border-gray-100 rounded-xl text-sm bg-gray-50 text-gray-400 cursor-not-allowed"
+                    />
                   </div>
                 )}
               </div>

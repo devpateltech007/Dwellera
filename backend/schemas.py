@@ -45,6 +45,7 @@ class UserBase(BaseModel):
     email: str
     name: str
     role: str
+    verification_token: Optional[str] = None
 
 class UserCreate(UserBase):
     pass
@@ -61,7 +62,9 @@ class UserOut(UserBase):
 
 class NegotiatorStartRequest(BaseModel):
     buyer_id: str
-    budget: float
+    budget: Optional[float] = None
+    min_budget: Optional[float] = None
+    max_budget: Optional[float] = None
     location_lat: Optional[float] = None
     location_lng: Optional[float] = None
     city: Optional[str] = None
@@ -146,3 +149,13 @@ class BuyerPreferenceOut(BuyerPreferenceBase):
 
 class BuyerAIModeUpdateRequest(BaseModel):
     enabled: bool = True
+
+
+class IDVerificationOut(BaseModel):
+    verification_token: str
+    verification_status: str
+    confidence_score: float
+    extracted_name: Optional[str] = None
+    id_last4: Optional[str] = None
+    doc_type: Optional[str] = None
+    message: str
