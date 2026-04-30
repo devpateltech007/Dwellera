@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { supabase } from "@/lib/supabase";
 import dynamic from 'next/dynamic';
@@ -9,6 +9,7 @@ const MapContainer = dynamic(() => import('react-leaflet').then(m => m.MapContai
 const TileLayer = dynamic(() => import('react-leaflet').then(m => m.TileLayer), { ssr: false });
 const Marker = dynamic(() => import('react-leaflet').then(m => m.Marker), { ssr: false });
 const Popup = dynamic(() => import('react-leaflet').then(m => m.Popup), { ssr: false });
+const DrawLayer = dynamic(() => import('@/components/DrawLayer'), { ssr: false });
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import PropertyDetailsModal from "@/components/PropertyDetailsModal";
@@ -55,6 +56,44 @@ export default function SearchPage() {
   const [mapCenter, setMapCenter] = useState<[number, number]>([37.7749, -122.4194]);
   const [mapSearchQuery, setMapSearchQuery] = useState("");
   const [isSearchingMap, setIsSearchingMap] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawnPolygon, setDrawnPolygon] = useState<[number, number][] | null>(null);
+  const [drawPointCount, setDrawPointCount] = useState(0);
+  const [triggerFinish, setTriggerFinish] = useState(false);
+
+  function pointInPolygon(pt: [number, number], poly: [number, number][]): boolean {
+    const [plat, plng] = pt;
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [ilat, ilng] = poly[i];
+      const [jlat, jlng] = poly[j];
+      // Cast a horizontal ray eastward from pt; count edge crossings
+      if ((ilat > plat) !== (jlat > plat) &&
+          plng < ((jlng - ilng) * (plat - ilat)) / (jlat - ilat) + ilng)
+        inside = !inside;
+    }
+    return inside;
+  }
+
+  const handleDrawComplete = useCallback((pts: [number, number][]) => {
+    setDrawnPolygon(pts);
+    setDrawMode(false);
+    setDrawPointCount(0);
+    setTriggerFinish(false);
+  }, []);
+
+  const handlePointsChange = useCallback((n: number) => setDrawPointCount(n), []);
+
+  const finishDraw = () => {
+    setTriggerFinish(true);
+  };
+
+  const clearDraw = () => {
+    setDrawnPolygon(null);
+    setDrawMode(false);
+    setDrawPointCount(0);
+    setTriggerFinish(false);
+  };
 
   const handleMapSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,6 +135,10 @@ export default function SearchPage() {
   useEffect(() => {
     fetchListings();
   }, []);
+
+  const activeListings = drawnPolygon
+    ? listings.filter((l: any) => pointInPolygon([l.location_lat, l.location_lng], drawnPolygon))
+    : listings;
 
   return (
     <ProtectedRoute>
@@ -181,14 +224,17 @@ export default function SearchPage() {
               </div>
             )}
             <h1 className="text-xl font-bold text-gray-900">Marketplace</h1>
-            <p className="text-sm text-gray-500">{listings.length} properties found</p>
+            <p className="text-sm text-gray-500">
+              {activeListings.length} {drawnPolygon ? `of ${listings.length} ` : ''}properties found
+              {drawnPolygon && <span className="ml-2 text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">Area filtered</span>}
+            </p>
           </div>
           
           <div className="overflow-y-auto p-4 flex-1">
             <div className="space-y-4">
-              {listings.map((l: any, i) => (
-                <div 
-                  key={i} 
+              {activeListings.map((l: any, i) => (
+                <div
+                  key={i}
                   onClick={() => setSelectedListing(l)}
                   className={`p-4 border rounded-xl shadow-sm hover:shadow-md transition cursor-pointer ${l.status === 'Sold' ? 'bg-gray-50 opacity-75' : 'bg-white'}`}
                   tabIndex={0}
@@ -228,6 +274,55 @@ export default function SearchPage() {
         {/* RIGHT: Full Height Map */}
         <div className="w-full h-[50vh] md:w-auto md:flex-1 md:h-full relative z-[5] order-first md:order-last border-b md:border-none shadow-sm md:shadow-none">
           
+          {/* Draw Area Controls */}
+          <div className="absolute top-4 right-4 z-[1000] flex flex-col items-end gap-2">
+            {!drawnPolygon && !drawMode && (
+              <button
+                onClick={() => setDrawMode(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shadow-lg border bg-white/90 backdrop-blur-sm text-gray-700 border-gray-200 hover:border-gray-400 transition-all"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 012.828 2.828L11.828 15.828a2 2 0 01-2.828 0L9 13zm-6 6h3" />
+                </svg>
+                Draw Area
+              </button>
+            )}
+            {drawMode && (
+              <>
+                <div className="bg-gray-900/85 backdrop-blur-sm text-white text-xs font-medium px-3 py-2 rounded-xl shadow-lg text-center leading-snug">
+                  {drawPointCount < 3
+                    ? `Click to add points (${drawPointCount} so far)`
+                    : `${drawPointCount} points · Click Finish or keep adding`}
+                </div>
+                {drawPointCount >= 3 && (
+                  <button
+                    onClick={finishDraw}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shadow-lg border bg-gray-900 text-white border-gray-900 transition-all"
+                  >
+                    Finish
+                  </button>
+                )}
+                <button
+                  onClick={clearDraw}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shadow-lg border bg-white/90 backdrop-blur-sm text-red-600 border-red-200 hover:border-red-400 transition-all"
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+            {drawnPolygon && (
+              <button
+                onClick={clearDraw}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shadow-lg border bg-white/90 backdrop-blur-sm text-red-600 border-red-200 hover:border-red-400 transition-all"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Clear Area
+              </button>
+            )}
+          </div>
+
           {/* Address Search Overlay */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] w-full max-w-sm px-4">
              <form onSubmit={handleMapSearch} className="flex shadow-xl rounded-xl bg-white/90 backdrop-blur-sm p-1.5 border border-gray-200">
@@ -258,7 +353,8 @@ export default function SearchPage() {
               attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
               url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             />
-            {listings.map((l: any, i) => (
+            <DrawLayer active={drawMode} polygon={drawnPolygon} triggerFinish={triggerFinish} onComplete={handleDrawComplete} onPointsChange={handlePointsChange} />
+            {activeListings.map((l: any, i) => (
               <Marker key={i} position={[l.location_lat, l.location_lng]} icon={icon}>
                 <Popup>
                   <div className="p-1 w-[200px]">
