@@ -9,16 +9,11 @@ type Pt = [number, number];
 interface Props {
   active: boolean;
   polygon: Pt[] | null;
-  triggerFinish: boolean;
   onComplete: (pts: Pt[]) => void;
-  onPointsChange: (n: number) => void;
 }
 
-export default function DrawLayer({ active, polygon, triggerFinish, onComplete, onPointsChange }: Props) {
+export default function DrawLayer({ active, polygon, onComplete }: Props) {
   const map = useMap();
-  const pointsRef = useRef<Pt[]>([]);
-  const previewLineRef = useRef<L.Polyline | null>(null);
-  const dotsRef = useRef<L.CircleMarker[]>([]);
   const polygonRef = useRef<L.Polygon | null>(null);
 
   // Show completed polygon overlay
@@ -37,85 +32,58 @@ export default function DrawLayer({ active, polygon, triggerFinish, onComplete, 
     return () => { polygonRef.current?.remove(); };
   }, [polygon, map]);
 
-  // Finish trigger from parent (Finish button)
-  useEffect(() => {
-    if (!triggerFinish) return;
-    const pts = pointsRef.current;
-    if (pts.length >= 3) {
-      cleanup();
-      onComplete(pts);
-    }
-  }, [triggerFinish]);
-
-  // Drawing interaction
+  // Freehand lasso — mousedown+drag+mouseup on the map
   useEffect(() => {
     if (!active) {
-      cleanup();
       map.dragging.enable();
-      map.scrollWheelZoom.enable();
-      map.doubleClickZoom.enable();
+      map.getContainer().style.cursor = "";
       return;
     }
 
     map.dragging.disable();
-    map.scrollWheelZoom.disable();
-    map.doubleClickZoom.disable();
     map.getContainer().style.cursor = "crosshair";
 
-    const onClick = (e: L.LeafletMouseEvent) => {
-      const pt: Pt = [e.latlng.lat, e.latlng.lng];
-      pointsRef.current = [...pointsRef.current, pt];
-      onPointsChange(pointsRef.current.length);
+    let drawing = false;
+    const pts: Pt[] = [];
+    let preview: L.Polyline | null = null;
 
-      const dot = L.circleMarker(pt, {
-        radius: 5,
-        color: "#fff",
-        weight: 2,
-        fillColor: "#111",
-        fillOpacity: 1,
-      }).addTo(map);
-      dotsRef.current.push(dot);
-
-      previewLineRef.current?.remove();
-      if (pointsRef.current.length > 1) {
-        previewLineRef.current = L.polyline(pointsRef.current, {
-          color: "#111",
-          weight: 2,
-          dashArray: "6 4",
-          opacity: 0.7,
-        }).addTo(map);
-      }
+    const onMouseDown = (e: L.LeafletMouseEvent) => {
+      drawing = true;
+      pts.length = 0;
+      pts.push([e.latlng.lat, e.latlng.lng]);
     };
 
-    const onDblClick = (e: L.LeafletMouseEvent) => {
-      L.DomEvent.stop(e);
-      const pts = pointsRef.current.slice(0, -1);
-      cleanup();
-      onPointsChange(0);
-      if (pts.length >= 3) onComplete(pts);
+    const onMouseMove = (e: L.LeafletMouseEvent) => {
+      if (!drawing) return;
+      pts.push([e.latlng.lat, e.latlng.lng]);
+      if (pts.length % 4 !== 0) return; // throttle redraws
+      preview?.remove();
+      preview = L.polyline(pts, { color: "#111", weight: 2, dashArray: "5 4", opacity: 0.85 }).addTo(map);
     };
 
-    map.on("click", onClick);
-    map.on("dblclick", onDblClick);
+    const finish = () => {
+      if (!drawing) return;
+      drawing = false;
+      preview?.remove();
+      preview = null;
+      if (pts.length >= 3) onComplete([...pts]);
+    };
+
+    map.on("mousedown", onMouseDown);
+    map.on("mousemove", onMouseMove);
+    map.on("mouseup", finish);
+    document.addEventListener("mouseup", finish); // catch release outside map
 
     return () => {
-      map.off("click", onClick);
-      map.off("dblclick", onDblClick);
+      map.off("mousedown", onMouseDown);
+      map.off("mousemove", onMouseMove);
+      map.off("mouseup", finish);
+      document.removeEventListener("mouseup", finish);
       map.dragging.enable();
-      map.scrollWheelZoom.enable();
-      map.doubleClickZoom.enable();
-      cleanup();
+      map.getContainer().style.cursor = "";
+      preview?.remove();
     };
-  }, [active, map, onComplete, onPointsChange]);
-
-  function cleanup() {
-    previewLineRef.current?.remove();
-    previewLineRef.current = null;
-    dotsRef.current.forEach(d => d.remove());
-    dotsRef.current = [];
-    pointsRef.current = [];
-    map.getContainer().style.cursor = "";
-  }
+  }, [active, map, onComplete]);
 
   return null;
 }
