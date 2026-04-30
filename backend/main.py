@@ -66,6 +66,38 @@ def get_listings(
         
     return query.all()
 
+def _point_in_polygon(lat: float, lng: float, polygon: list) -> bool:
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        ilat, ilng = polygon[i][0], polygon[i][1]
+        jlat, jlng = polygon[j][0], polygon[j][1]
+        if ((ilat > lat) != (jlat > lat)) and \
+           (lng < (jlng - ilng) * (lat - ilat) / (jlat - ilat) + ilng):
+            inside = not inside
+        j = i
+    return inside
+
+
+@app.post("/api/listings/search", response_model=list[schemas.ListingOut])
+def search_listings_in_polygon(payload: schemas.ListingPolygonSearch, db: Session = Depends(get_db)):
+    query = db.query(models.Listing)
+    if payload.search:
+        query = query.filter(models.Listing.title.ilike(f"%{payload.search}%") | models.Listing.description.ilike(f"%{payload.search}%"))
+    if payload.min_price is not None:
+        query = query.filter(models.Listing.price >= payload.min_price)
+    if payload.max_price is not None:
+        query = query.filter(models.Listing.price <= payload.max_price)
+    if payload.min_bedrooms is not None:
+        query = query.filter(models.Listing.bedrooms >= payload.min_bedrooms)
+    if payload.property_type and payload.property_type.lower() != 'all':
+        query = query.filter(models.Listing.property_type.ilike(payload.property_type))
+
+    listings = query.all()
+    return [l for l in listings if _point_in_polygon(l.location_lat, l.location_lng, payload.polygon)]
+
+
 @app.post("/api/listings", response_model=schemas.ListingOut)
 def create_listing(listing: schemas.ListingCreate, db: Session = Depends(get_db)):
     db_listing = models.Listing(**listing.model_dump())

@@ -17,6 +17,14 @@ class ListingBase(BaseModel):
 class ListingCreate(ListingBase):
     seller_id: str
 
+class ListingPolygonSearch(BaseModel):
+    polygon: List[List[float]]  # [[lat, lng], ...]
+    search: Optional[str] = None
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    min_bedrooms: Optional[int] = None
+    property_type: Optional[str] = None
+
 class ListingOut(ListingBase):
     id: int
     seller_id: str

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { supabase } from "@/lib/supabase";
 import dynamic from 'next/dynamic';
@@ -10,6 +10,7 @@ const TileLayer = dynamic(() => import('react-leaflet').then(m => m.TileLayer), 
 const Marker = dynamic(() => import('react-leaflet').then(m => m.Marker), { ssr: false });
 const Popup = dynamic(() => import('react-leaflet').then(m => m.Popup), { ssr: false });
 const HeatmapLayer = dynamic(() => import('@/components/HeatmapLayer'), { ssr: false });
+const DrawLayer = dynamic(() => import('@/components/DrawLayer'), { ssr: false });
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import PropertyDetailsModal from "@/components/PropertyDetailsModal";
@@ -91,6 +92,42 @@ export default function SearchPage() {
   const [mapCenter, setMapCenter] = useState<[number, number]>([37.7749, -122.4194]);
   const [mapSearchQuery, setMapSearchQuery] = useState("");
   const [isSearchingMap, setIsSearchingMap] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawnPolygon, setDrawnPolygon] = useState<[number, number][] | null>(null);
+  const [totalListings, setTotalListings] = useState(0);
+
+  const fetchListingsInPolygon = async (pts: [number, number][]) => {
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/listings/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          polygon: pts,
+          search: filters.search || null,
+          min_price: filters.min_price ? Number(filters.min_price) : null,
+          max_price: filters.max_price ? Number(filters.max_price) : null,
+          min_bedrooms: filters.min_bedrooms ? Number(filters.min_bedrooms) : null,
+          property_type: filters.property_type !== 'All' ? filters.property_type : null,
+        }),
+      });
+      const data = await res.json();
+      setListings(data);
+    } catch (err) {
+      console.error('Failed to fetch listings in polygon:', err);
+    }
+  };
+
+  const handleDrawComplete = useCallback((pts: [number, number][]) => {
+    setDrawnPolygon(pts);
+    setDrawMode(false);
+    fetchListingsInPolygon(pts);
+  }, [filters]);
+
+  const clearDraw = () => {
+    setDrawnPolygon(null);
+    setDrawMode(false);
+    fetchListings();
+  };
 
   const handleMapSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,6 +161,7 @@ export default function SearchPage() {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/listings?${params.toString()}`);
       const data = await res.json();
       setListings(data);
+      setTotalListings(data.length);
     } catch (err) {
       console.error('Failed to fetch listings:', err);
     }
@@ -217,14 +255,17 @@ export default function SearchPage() {
               </div>
             )}
             <h1 className="text-xl font-bold text-gray-900">Marketplace</h1>
-            <p className="text-sm text-gray-500">{listings.length} properties found</p>
+            <p className="text-sm text-gray-500">
+              {listings.length} {drawnPolygon ? `of ${totalListings} ` : ''}properties found
+              {drawnPolygon && <span className="ml-2 text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">Area filtered</span>}
+            </p>
           </div>
           
           <div className="overflow-y-auto p-4 flex-1">
             <div className="space-y-4">
               {listings.map((l: any, i) => (
-                <div 
-                  key={i} 
+                <div
+                  key={i}
                   onClick={() => setSelectedListing(l)}
                   className={`p-4 border rounded-xl shadow-sm hover:shadow-md transition cursor-pointer ${l.status === 'Sold' ? 'bg-gray-50 opacity-75' : 'bg-white'}`}
                   tabIndex={0}
@@ -264,6 +305,40 @@ export default function SearchPage() {
         {/* RIGHT: Full Height Map */}
         <div className="w-full h-[50vh] md:w-auto md:flex-1 md:h-full relative z-[5] order-first md:order-last border-b md:border-none shadow-sm md:shadow-none">
           
+          {/* Lasso Controls */}
+          <div className="absolute top-4 right-4 z-[1000] flex flex-col items-end gap-2">
+            {!drawnPolygon ? (
+              <button
+                onClick={() => setDrawMode(m => !m)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shadow-lg border transition-all ${
+                  drawMode
+                    ? 'bg-gray-900 text-white border-gray-900'
+                    : 'bg-white/90 backdrop-blur-sm text-gray-700 border-gray-200 hover:border-gray-400'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 15l-7 7M9 9l6 6m0-6L9 15m6-6l-7 7" />
+                </svg>
+                {drawMode ? 'Drawing…' : 'Lasso Select'}
+              </button>
+            ) : (
+              <button
+                onClick={clearDraw}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shadow-lg border bg-white/90 backdrop-blur-sm text-red-600 border-red-200 hover:border-red-400 transition-all"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Clear Selection
+              </button>
+            )}
+            {drawMode && (
+              <div className="bg-gray-900/80 backdrop-blur-sm text-white text-xs font-medium px-3 py-2 rounded-xl shadow-lg text-center leading-snug">
+                Hold & drag to draw a selection
+              </div>
+            )}
+          </div>
+
           {/* Address Search Overlay */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] w-full max-w-sm px-4">
              <form onSubmit={handleMapSearch} className="flex shadow-xl rounded-xl bg-white/90 backdrop-blur-sm p-1.5 border border-gray-200">
@@ -297,6 +372,7 @@ export default function SearchPage() {
               url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             />
             <HeatmapLayer listings={listings} visible={true} />
+            <DrawLayer active={drawMode} polygon={drawnPolygon} onComplete={handleDrawComplete} />
             {listings.map((l: any, i) => (
               <Marker key={i} position={[l.location_lat, l.location_lng]} icon={createPriceIcon(l.price)}>
                 <Popup>
