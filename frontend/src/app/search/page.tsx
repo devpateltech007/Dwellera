@@ -9,17 +9,53 @@ const MapContainer = dynamic(() => import('react-leaflet').then(m => m.MapContai
 const TileLayer = dynamic(() => import('react-leaflet').then(m => m.TileLayer), { ssr: false });
 const Marker = dynamic(() => import('react-leaflet').then(m => m.Marker), { ssr: false });
 const Popup = dynamic(() => import('react-leaflet').then(m => m.Popup), { ssr: false });
+const HeatmapLayer = dynamic(() => import('@/components/HeatmapLayer'), { ssr: false });
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import PropertyDetailsModal from "@/components/PropertyDetailsModal";
 
-const icon = L.icon({
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-});
+function formatPrice(price: number): string {
+  if (price >= 1_000_000) return `$${(price / 1_000_000).toFixed(1)}M`;
+  if (price >= 1_000) return `$${Math.round(price / 1_000)}K`;
+  return `$${price}`;
+}
+
+function createPriceIcon(price: number): L.DivIcon {
+  const label = formatPrice(price);
+  return L.divIcon({
+    className: "",
+    html: `
+      <div style="
+        background: white;
+        color: #111;
+        font-size: 12px;
+        font-weight: 800;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        padding: 5px 10px;
+        border-radius: 20px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.22);
+        white-space: nowrap;
+        position: relative;
+        display: inline-block;
+        border: 1.5px solid rgba(0,0,0,0.08);
+        letter-spacing: -0.2px;
+      ">
+        ${label}
+        <div style="
+          position: absolute;
+          bottom: -6px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 0; height: 0;
+          border-left: 5px solid transparent;
+          border-right: 5px solid transparent;
+          border-top: 6px solid white;
+        "></div>
+      </div>`,
+    iconAnchor: [28, 36],
+    popupAnchor: [0, -38],
+  });
+}
 
 
 
@@ -231,21 +267,23 @@ export default function SearchPage() {
           {/* Address Search Overlay */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] w-full max-w-sm px-4">
              <form onSubmit={handleMapSearch} className="flex shadow-xl rounded-xl bg-white/90 backdrop-blur-sm p-1.5 border border-gray-200">
-               <input 
-                 value={mapSearchQuery} 
-                 onChange={e => setMapSearchQuery(e.target.value)} 
+               <input
+                 value={mapSearchQuery}
+                 onChange={e => setMapSearchQuery(e.target.value)}
                  placeholder="Fly map to city, zip, or address..."
                  className="flex-1 px-4 py-2 bg-transparent focus:outline-none text-gray-800 placeholder-gray-500 font-medium"
                />
-               <button 
-                 type="submit" 
-                 disabled={isSearchingMap} 
+               <button
+                 type="submit"
+                 disabled={isSearchingMap}
                  className="px-5 py-2 bg-gray-900 text-white font-bold rounded-lg hover:bg-gray-800 transition disabled:opacity-50"
                >
                   {isSearchingMap ? '...' : 'Go'}
                </button>
              </form>
           </div>
+
+
 
           <MapContainer 
             key={`${mapCenter[0]}-${mapCenter[1]}`}
@@ -258,8 +296,9 @@ export default function SearchPage() {
               attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
               url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             />
+            <HeatmapLayer listings={listings} visible={true} />
             {listings.map((l: any, i) => (
-              <Marker key={i} position={[l.location_lat, l.location_lng]} icon={icon}>
+              <Marker key={i} position={[l.location_lat, l.location_lng]} icon={createPriceIcon(l.price)}>
                 <Popup>
                   <div className="p-1 w-[200px]">
                     {l.image_urls && l.image_urls.length > 0 && (
