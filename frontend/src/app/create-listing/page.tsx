@@ -15,6 +15,7 @@ export default function CreateListingPage() {
   const [form, setForm] = useState({
     title: "",
     description: "",
+    walkthrough_url: "",
     price: "",
     bedrooms: 1,
     bathrooms: 1,
@@ -78,6 +79,7 @@ export default function CreateListingPage() {
         body: JSON.stringify({
           title: form.title,
           description: form.description,
+          walkthrough_url: form.walkthrough_url.trim() || null,
           price: parseFloat(form.price),
           bedrooms: form.bedrooms,
           bathrooms: form.bathrooms,
@@ -127,6 +129,18 @@ export default function CreateListingPage() {
                 value={form.description} onChange={e => setForm({...form, description: e.target.value})}
                 placeholder="Describe the property..."
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">3D Walkthrough URL (Optional)</label>
+              <input
+                type="url"
+                className="w-full px-4 py-2 border rounded-lg focus:ring-primary focus:border-primary"
+                value={form.walkthrough_url}
+                onChange={e => setForm({ ...form, walkthrough_url: e.target.value })}
+                placeholder="https://my.matterport.com/show/?m=..."
+              />
+              <p className="text-xs text-gray-500 mt-1">Paste a virtual tour link (Matterport, Kuula, YouTube, etc.).</p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

@@ -57,7 +57,7 @@ async function fetchBuyerPreferences(userId: string, apiBase: string): Promise<B
 
 function buildLiveSystemInstruction(loggedIn: boolean, prefs: BuyerPrefs): string {
   const lines = [
-    "You are Dwellera's voice and text assistant for property search, listings, and buyer negotiation.",
+    "You are Dwellera's voice and text assistant for property search, listings, and negotiation (buyer or seller).",
     "",
     "SAVED BUYER PROFILE (from this user's Dwellera account—use these values in tool calls unless the user clearly overrides them in this conversation):"
   ];
@@ -74,7 +74,7 @@ function buildLiveSystemInstruction(loggedIn: boolean, prefs: BuyerPrefs): strin
     if (prefs.notes?.trim()) lines.push(`- Extra notes: ${prefs.notes}`);
     lines.push("");
     lines.push(
-      "When the user wants to start a negotiation campaign or seller outreach, call start_negotiator_campaign using the SAVED BUYER PROFILE for every parameter you can fill from it (especially min_budget and max_budget). Do not tell the user you lack access to their preferences—they are listed above. Only ask the user for fields that are genuinely missing from the profile (for example if min budget shows \"not saved yet\")."
+    "When the user wants to start a negotiation campaign or seller outreach, call start_negotiator_campaign using the SAVED BUYER PROFILE for every parameter you can fill from it (especially min_budget and max_budget). Choose negotiating_for_role = \"buyer\" when you are negotiating as the buyer, or \"seller\" when negotiating as the seller. Do not tell the user you lack access to their preferences—they are listed above. Only ask the user for fields that are genuinely missing from the profile (for example if min budget shows \"not saved yet\")."
     );
     lines.push(
       "If the user confirms they want outreach with saved prefs (for example chosen max_candidates), say one brief line like you're starting—and call the tool once. Do not repeat the full parameter list in multiple paragraphs or stall with meta commentary before calling tools."
@@ -456,7 +456,7 @@ export default function AIPage() {
                 {
                   name: "start_negotiator_campaign",
                   description:
-                    "Starts an AI negotiator campaign: finds listings near the buyer budget and opens outreach to sellers. The user's saved profile is in your system instructions—pass those values for budget, city, beds, baths, and type whenever they are set there. Omit a parameter only when you need the user to supply it and it is missing from the profile.",
+                    "Starts an AI negotiator campaign. Finds candidate listings and opens the first outreach message. Pass negotiating_for_role = \"buyer\" or \"seller\" depending on who the negotiator is acting for.",
                   parameters: {
                     type: "OBJECT",
                     properties: {
@@ -473,18 +473,23 @@ export default function AIPage() {
                       min_bathrooms: { type: "INTEGER", description: "Minimum bathrooms needed" },
                       property_type: { type: "STRING", description: "House, Apartment, Condo, or Townhouse" },
                       radius_km: { type: "NUMBER", description: "Search radius in km, default 20" },
-                      max_candidates: { type: "INTEGER", description: "Number of seller negotiations to open" }
+                      max_candidates: { type: "INTEGER", description: "Number of seller negotiations to open" },
+                      negotiating_for_role: {
+                        type: "STRING",
+                        description: "Who the backend negotiator should act for: \"buyer\" or \"seller\".",
+                        enum: ["buyer", "seller"]
+                      }
                     }
                   }
                 },
                 {
                   name: "continue_negotiation",
-                  description: "Saves seller response into negotiation memory and generates the next human style negotiation response with a suggested offer.",
+                  description: "Saves the counterparty response into negotiation memory and generates the next human style negotiation response with a suggested offer.",
                   parameters: {
                     type: "OBJECT",
                     properties: {
                       session_id: { type: "INTEGER", description: "Negotiation session id" },
-                      seller_reply: { type: "STRING", description: "Latest seller response text" }
+                      seller_reply: { type: "STRING", description: "Latest counterparty response text (name kept for backwards compatibility)" }
                     },
                     required: ["session_id", "seller_reply"]
                   }
@@ -644,6 +649,7 @@ export default function AIPage() {
                     radius_km: a.radius_km ?? 20,
                     max_candidates: a.max_candidates ?? 5,
                     auto_mode: autoNegotiatorEnabled,
+                    negotiating_for_role: a.negotiating_for_role ?? "buyer",
                     budget,
                     min_budget: minBudget ?? null,
                     max_budget: maxBudget ?? null,

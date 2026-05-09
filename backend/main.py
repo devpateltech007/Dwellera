@@ -27,6 +27,7 @@ def ensure_negotiation_schema(target_conn):
         "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS target_lng DOUBLE PRECISION DEFAULT 0;",
         "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS seller_id VARCHAR DEFAULT '';",
         "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS auto_mode BOOLEAN DEFAULT TRUE;",
+        "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS negotiating_for_role VARCHAR DEFAULT 'buyer';",
         "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS last_processed_message_id INTEGER;",
         "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS final_offer DOUBLE PRECISION;",
         "ALTER TABLE negotiation_sessions ADD COLUMN IF NOT EXISTS final_note VARCHAR DEFAULT '';",
@@ -74,19 +75,38 @@ def startup_db_migration():
     try:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE listings ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'Available';"))
+            conn.execute(text("ALTER TABLE listings ADD COLUMN IF NOT EXISTS walkthrough_url VARCHAR;"))
             ensure_negotiation_schema(conn)
             ensure_buyer_preferences_schema(conn)
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token VARCHAR;"))
             print("Successfully migrated 'status' column on startup!")
-            
+                
+    except Exception as e:
+        print("Startup migration error:", e)
+
+    # These two steps must not share the same transaction as schema migration.
+    # If Supabase publication ALTER fails, it can abort the transaction and prevent
+    # later statements from running—leaving existing sessions stuck on auto_mode=false.
+    try:
+        with engine.begin() as conn:
             try:
                 conn.execute(text("ALTER PUBLICATION supabase_realtime ADD TABLE messages;"))
                 print("Enabled Live websockets. Added messages to supabase_realtime!")
             except Exception as e:
                 print("Publication Add Note (might already exist):", e)
-                
     except Exception as e:
-        print("Startup migration error:", e)
+        print("Publication enabling step failed:", e)
+
+    # Ensure negotiation autopilot resumes after backend restarts.
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE negotiation_sessions SET auto_mode = TRUE WHERE status = 'active';"
+                )
+            )
+    except Exception as e:
+        print("Failed to force auto_mode on active sessions:", e)
 
     # Keep negotiating in background even when user is away.
     if autopilot_task is None or autopilot_task.done():
@@ -326,7 +346,20 @@ def listing_area_rank_score(listing: models.Listing, area: Optional[str]) -> int
     return 0 if a in blob else 1
 
 
-def build_opening_message(listing_title: str, budget: float) -> str:
+def build_opening_message(listing_title: str, budget: float, negotiating_for_role: str) -> str:
+    """
+    Build the negotiator's first message for the chosen agent role.
+    negotiating_for_role = "buyer" means we introduce ourselves as the buyer.
+    negotiating_for_role = "seller" means we introduce ourselves as the seller (counter-offer side).
+    """
+    if negotiating_for_role == "seller":
+        return normalize_human_text(
+            f"Hi! I’m the seller of {listing_title}. I’m targeting offers around ${budget:,.0f}. "
+            "Can you share your timeline to close and whether you’ll need any repairs/inspections addressed? "
+            "If we can align on timing, I’m ready to move quickly."
+        )
+
+    # Default: buyer mode (existing behavior)
     return normalize_human_text(
         f"Hi, I am very interested in {listing_title}. My buying budget is around ${budget:,.0f}. "
         "Could you share the current property condition and whether any repairs are needed? "
@@ -334,7 +367,8 @@ def build_opening_message(listing_title: str, budget: float) -> str:
     )
 
 
-def build_next_negotiation_reply(listing_price: float, seller_reply: str):
+def build_next_buyer_negotiation_reply(listing_price: float, seller_reply: str):
+    """Buyer-side logic: counter-offer with a discount from the listing price."""
     reply_text = (seller_reply or "").lower()
     urgency_signals = ["urgent", "quick", "asap", "moving", "relocate", "relocating", "need to sell", "fast"]
     condition_signals = ["repair", "fix", "as is", "old", "dated", "renovation", "work needed"]
@@ -354,6 +388,40 @@ def build_next_negotiation_reply(listing_price: float, seller_reply: str):
         "If this is close for you, I can move to next steps right away."
     )
     return suggested_offer, normalize_human_text(message)
+
+
+def build_next_seller_negotiation_reply(listing_price: float, buyer_reply: str):
+    """Seller-side logic: counter-offer with a small premium (or a reduction if repairs are emphasized)."""
+    reply_text = (buyer_reply or "").lower()
+    urgency_signals = ["urgent", "quick", "asap", "moving", "relocate", "relocating", "need to buy", "fast"]
+    condition_signals = ["repair", "fix", "as is", "old", "dated", "renovation", "work needed"]
+
+    urgency_score = 1 if any(x in reply_text for x in urgency_signals) else 0
+    condition_score = 1 if any(x in reply_text for x in condition_signals) else 0
+
+    base_premium = 0.02
+    urgency_premium = 0.05 if urgency_score else 0.0
+    # If the buyer is pushing hard on repairs, reduce what we’re asking.
+    condition_reduction = 0.06 if condition_score else 0.0
+
+    total_premium = base_premium + urgency_premium - condition_reduction
+    total_premium = max(0.0, min(0.20, total_premium))
+    suggested_offer = round(listing_price * (1 + total_premium), 2)
+
+    message = (
+        f"Thanks for the details. Based on your timeline and what you shared about condition/repairs, "
+        f"I can consider ${suggested_offer:,.0f} with a closing that works for you. "
+        "If that feels fair, we can lock the next steps quickly."
+    )
+    return suggested_offer, normalize_human_text(message)
+
+
+def build_next_negotiation_reply(
+    listing_price: float, counterparty_reply: str, negotiating_for_role: str
+):
+    if negotiating_for_role == "seller":
+        return build_next_seller_negotiation_reply(listing_price, counterparty_reply)
+    return build_next_buyer_negotiation_reply(listing_price, counterparty_reply)
 
 
 def seller_accepts_offer(text: str) -> bool:
@@ -383,36 +451,55 @@ def process_autopilot_sessions(db: Session):
     )
 
     for session in sessions:
-        latest_seller_msg = (
+        agent_role = (session.negotiating_for_role or "buyer").lower()
+        agent_user_id = session.buyer_id if agent_role == "buyer" else session.seller_id
+        counterparty_user_id = session.seller_id if agent_role == "buyer" else session.buyer_id
+        counterparty_turn_role = "seller" if counterparty_user_id == session.seller_id else "buyer"
+
+        latest_counterparty_msg = (
             db.query(models.Message)
             .filter(
                 models.Message.listing_id == session.listing_id,
-                models.Message.sender_id == session.seller_id,
-                models.Message.receiver_id == session.buyer_id
+                models.Message.sender_id == counterparty_user_id,
+                models.Message.receiver_id == agent_user_id,
             )
             .order_by(models.Message.created_at.desc())
             .first()
         )
-        if not latest_seller_msg:
+        if not latest_counterparty_msg:
             continue
 
-        if session.last_processed_message_id and latest_seller_msg.id <= session.last_processed_message_id:
+        if (
+            session.last_processed_message_id
+            and latest_counterparty_msg.id <= session.last_processed_message_id
+        ):
             continue
 
-        seller_text = normalize_human_text(latest_seller_msg.content)
-        db.add(models.NegotiationTurn(session_id=session.id, role="seller", content=seller_text))
+        counterparty_text = normalize_human_text(latest_counterparty_msg.content)
+        db.add(
+            models.NegotiationTurn(
+                session_id=session.id,
+                role=counterparty_turn_role,
+                content=counterparty_text,
+            )
+        )
 
-        if seller_accepts_offer(seller_text):
+        if seller_accepts_offer(counterparty_text):
             listing = db.query(models.Listing).filter(models.Listing.id == session.listing_id).first()
             final_offer = session.final_offer or (listing.price if listing else session.budget)
+            moving_party = "Seller" if agent_role == "buyer" else "Buyer"
             session.status = "finalized"
             session.finalized_at = datetime.datetime.utcnow()
-            session.final_note = "Seller accepted. Buyer should move forward."
-            session.last_processed_message_id = latest_seller_msg.id
+            session.final_note = (
+                f"{moving_party} accepted. Deal finalized for your next steps."
+            )
+            session.last_processed_message_id = latest_counterparty_msg.id
 
             final_msg = normalize_human_text(
                 f"Great news. Your deal is finalized at ${final_offer:,.0f}. "
-                "Seller accepted the terms. Please move forward with contract and due diligence steps."
+                f"Before we finalize, confirm who I am negotiating on behalf of (BUYER or SELLER). "
+                f"Currently: {agent_role.upper()}. "
+                "If that’s not correct, tell us—otherwise please move forward with contract and due diligence steps."
             )
             db.add(
                 models.NegotiationTurn(
@@ -426,7 +513,7 @@ def process_autopilot_sessions(db: Session):
                 models.Message(
                     listing_id=session.listing_id,
                     sender_id=NEGOTIATOR_BOT_ID,
-                    receiver_id=session.buyer_id,
+                    receiver_id=agent_user_id,
                     content=final_msg
                 )
             )
@@ -436,10 +523,18 @@ def process_autopilot_sessions(db: Session):
         if not listing:
             continue
 
-        suggested_offer, agent_reply = build_next_negotiation_reply(listing.price, seller_text)
-        suggested_offer = min(suggested_offer, session.budget)
+        suggested_offer, agent_reply = build_next_negotiation_reply(
+            listing.price, counterparty_text, agent_role
+        )
+
+        # Clamp the computed counter-offer to the agent's constraints.
+        if agent_role == "buyer":
+            suggested_offer = min(suggested_offer, session.budget)
+        else:
+            suggested_offer = max(suggested_offer, session.budget)
+
         session.final_offer = suggested_offer
-        session.last_processed_message_id = latest_seller_msg.id
+        session.last_processed_message_id = latest_counterparty_msg.id
 
         db.add(
             models.NegotiationTurn(
@@ -452,8 +547,8 @@ def process_autopilot_sessions(db: Session):
         db.add(
             models.Message(
                 listing_id=session.listing_id,
-                sender_id=session.buyer_id,
-                receiver_id=session.seller_id,
+                sender_id=agent_user_id,
+                receiver_id=counterparty_user_id,
                 content=agent_reply
             )
         )
@@ -540,10 +635,11 @@ def start_negotiator_campaign(payload: schemas.NegotiatorStartRequest, db: Sessi
     else:
         ranked.sort(key=lambda item: (item[2], item[1]))
     shortlisted = ranked[:payload.max_candidates]
+    agent_role = (payload.negotiating_for_role or "buyer").lower()
 
     sessions_out = []
     for listing, distance_km, _, _ in shortlisted:
-        opening_message = build_opening_message(listing.title, target_budget)
+        opening_message = build_opening_message(listing.title, target_budget, agent_role)
         session = models.NegotiationSession(
             buyer_id=payload.buyer_id,
             listing_id=listing.id,
@@ -551,18 +647,25 @@ def start_negotiator_campaign(payload: schemas.NegotiatorStartRequest, db: Sessi
             budget=target_budget,
             target_lat=payload.location_lat or 0,
             target_lng=payload.location_lng or 0,
-            auto_mode=payload.auto_mode,
-            strategy_notes="Natural human tone. Ask condition, urgency, and close with fair offer."
+            # Always enable autopilot for newly created sessions.
+            # The UI's "AI mode" should not be required for the backend negotiator to run.
+            auto_mode=True,
+            strategy_notes="Natural human tone. Ask condition, urgency, and close with fair offer.",
+            negotiating_for_role=agent_role,
         )
         db.add(session)
         db.flush()
 
         db.add(models.NegotiationTurn(session_id=session.id, role="agent", content=opening_message))
+
+        agent_user_id = session.buyer_id if agent_role == "buyer" else session.seller_id
+        counterparty_user_id = session.seller_id if agent_role == "buyer" else session.buyer_id
+
         db.add(
             models.Message(
                 listing_id=listing.id,
-                sender_id=payload.buyer_id,
-                receiver_id=listing.seller_id,
+                sender_id=agent_user_id,
+                receiver_id=counterparty_user_id,
                 content=opening_message
             )
         )
@@ -575,7 +678,8 @@ def start_negotiator_campaign(payload: schemas.NegotiatorStartRequest, db: Sessi
                 listing_title=listing.title,
                 listing_price=listing.price,
                 distance_km=round(distance_km, 2),
-                opening_message=opening_message
+                opening_message=opening_message,
+                negotiating_for_role=agent_role,
             )
         )
 
@@ -594,32 +698,99 @@ def continue_negotiation(session_id: int, payload: schemas.NegotiatorSellerReply
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
 
-    seller_message = normalize_human_text(payload.seller_reply)
-    db.add(models.NegotiationTurn(session_id=session_id, role="seller", content=seller_message))
+    agent_role = (session.negotiating_for_role or "buyer").lower()
+    agent_user_id = session.buyer_id if agent_role == "buyer" else session.seller_id
+    counterparty_user_id = session.seller_id if agent_role == "buyer" else session.buyer_id
+    counterparty_turn_role = "seller" if counterparty_user_id == session.seller_id else "buyer"
+
+    counterparty_message = normalize_human_text(payload.seller_reply)
+
+    db.add(
+        models.NegotiationTurn(
+            session_id=session_id,
+            role=counterparty_turn_role,
+            content=counterparty_message,
+        )
+    )
     db.add(
         models.Message(
             listing_id=session.listing_id,
-            sender_id=session.seller_id,
-            receiver_id=session.buyer_id,
-            content=seller_message
+            sender_id=counterparty_user_id,
+            receiver_id=agent_user_id,
+            content=counterparty_message,
         )
     )
 
-    suggested_offer, agent_reply = build_next_negotiation_reply(listing.price, seller_message)
+    # If the counterparty accepts, finalize immediately.
+    if seller_accepts_offer(counterparty_message):
+        final_offer = session.final_offer or (listing.price if listing else session.budget)
+        session.status = "finalized"
+        session.finalized_at = datetime.datetime.utcnow()
+        session.final_note = f"{'Seller' if agent_role == 'buyer' else 'Buyer'} accepted. Deal finalized."
+        session.last_processed_message_id = None
+
+        final_msg = normalize_human_text(
+            f"Great news. Your deal is finalized at ${final_offer:,.0f}. "
+            f"Before we finalize, confirm who I am negotiating on behalf of (BUYER or SELLER). "
+            f"Currently: {agent_role.upper()}. "
+            "Please move forward with contract and due diligence steps."
+        )
+        db.add(
+            models.NegotiationTurn(
+                session_id=session_id,
+                role="system",
+                content=final_msg,
+                offer_price=final_offer,
+            )
+        )
+        db.add(
+            models.Message(
+                listing_id=session.listing_id,
+                sender_id=NEGOTIATOR_BOT_ID,
+                receiver_id=agent_user_id,
+                content=final_msg,
+            )
+        )
+
+        db.commit()
+
+        turns = (
+            db.query(models.NegotiationTurn)
+            .filter(models.NegotiationTurn.session_id == session_id)
+            .order_by(models.NegotiationTurn.created_at.asc())
+            .all()
+        )
+        return schemas.NegotiatorReplyOut(
+            session_id=session_id,
+            listing_id=session.listing_id,
+            suggested_offer=final_offer,
+            reply=final_msg,
+            turns=turns,
+        )
+
+    suggested_offer, agent_reply = build_next_negotiation_reply(
+        listing.price, counterparty_message, agent_role
+    )
+    # Clamp the computed counter-offer to the agent's constraints.
+    if agent_role == "buyer":
+        suggested_offer = min(suggested_offer, session.budget)
+    else:
+        suggested_offer = max(suggested_offer, session.budget)
+
     db.add(
         models.NegotiationTurn(
             session_id=session_id,
             role="agent",
             content=agent_reply,
-            offer_price=suggested_offer
+            offer_price=suggested_offer,
         )
     )
     db.add(
         models.Message(
             listing_id=session.listing_id,
-            sender_id=session.buyer_id,
-            receiver_id=session.seller_id,
-            content=agent_reply
+            sender_id=agent_user_id,
+            receiver_id=counterparty_user_id,
+            content=agent_reply,
         )
     )
     db.commit()

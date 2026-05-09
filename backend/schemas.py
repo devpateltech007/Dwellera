@@ -12,6 +12,7 @@ class ListingBase(BaseModel):
     location_lat: float
     location_lng: float
     image_urls: List[str] = []
+    walkthrough_url: Optional[str] = None
     status: str = "Available"
 
 class ListingCreate(ListingBase):
@@ -75,6 +76,7 @@ class NegotiatorStartRequest(BaseModel):
     radius_km: float = 20
     max_candidates: int = 5
     auto_mode: bool = True
+    negotiating_for_role: str = "buyer"  # "buyer" or "seller"
 
 
 class NegotiatorSessionOut(BaseModel):
@@ -85,6 +87,7 @@ class NegotiatorSessionOut(BaseModel):
     listing_price: float
     distance_km: float
     opening_message: str
+    negotiating_for_role: str = "buyer"
 
 
 class NegotiatorStartResponse(BaseModel):

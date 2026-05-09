@@ -25,6 +25,7 @@ class Listing(Base):
     location_lat = Column(Float)
     location_lng = Column(Float)
     image_urls = Column(JSON) # Array of Cloudinary URLs
+    walkthrough_url = Column(String, nullable=True) # Optional 3D walkthrough / virtual tour URL
     status = Column(String, default="Available") # Available, Sold
     seller_id = Column(String, index=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -49,6 +50,10 @@ class NegotiationSession(Base):
     target_lat = Column(Float, nullable=False)
     target_lng = Column(Float, nullable=False)
     auto_mode = Column(Boolean, default=True)
+    # Who the negotiator is acting for in this session.
+    # - "buyer": negotiator sends offers to the seller and reads seller replies.
+    # - "seller": negotiator sends counter-offers to the buyer and reads buyer replies.
+    negotiating_for_role = Column(String, nullable=False, default="buyer")
     last_processed_message_id = Column(Integer, nullable=True)
     final_offer = Column(Float, nullable=True)
     final_note = Column(String, default="")
