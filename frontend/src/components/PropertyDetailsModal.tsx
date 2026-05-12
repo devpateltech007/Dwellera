@@ -136,7 +136,13 @@ function MortgageCalculator({ price }: { price: number }) {
 }
 
 export default function PropertyDetailsModal({ listing, onClose }: { listing: any, onClose: () => void }) {
+  const [showWalkthrough, setShowWalkthrough] = useState(false);
   if (!listing) return null;
+
+  const matterportUrl = listing.matterport_url || listing.matterportUrl;
+  const viewerUrl = matterportUrl
+    ? `${matterportUrl}${matterportUrl.includes("?") ? "&" : "?"}play=1`
+    : "";
 
   return (
     <div className="fixed inset-0 bg-black/60 z-[9999] flex justify-center items-center p-4 backdrop-blur-md animate-in fade-in duration-300">
@@ -149,7 +155,54 @@ export default function PropertyDetailsModal({ listing, onClose }: { listing: an
           <svg className="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
         </button>
 
-        <ImageCarousel urls={listing.image_urls} title={listing.title} className="w-full h-[400px] bg-gray-100" />
+        <div className="relative">
+          <ImageCarousel urls={listing.image_urls} title={listing.title} className="w-full h-[400px] bg-gray-100" />
+          {matterportUrl && (
+            <button
+              onClick={() => setShowWalkthrough(true)}
+              className="absolute bottom-4 right-4 z-40 bg-black hover:bg-gray-900 text-white rounded-full px-4 py-2 shadow-xl font-black text-sm flex items-center gap-2 transition hover:scale-105"
+              aria-label="Open 3D walkthrough"
+              title="Open 3D walkthrough"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" />
+                <path d="M12 12l8-4.5" />
+                <path d="M12 12v9" />
+                <path d="M12 12L4 7.5" />
+              </svg>
+              3D Walkthrough
+            </button>
+          )}
+        </div>
+
+        {showWalkthrough && matterportUrl && (
+          <div className="fixed inset-0 z-[10000] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-6xl rounded-2xl overflow-hidden shadow-2xl">
+              <div className="flex items-center justify-between px-5 py-4 border-b">
+                <div>
+                  <h3 className="font-black text-gray-900">3D Walkthrough</h3>
+                  <p className="text-xs text-gray-500 line-clamp-1">{listing.title}</p>
+                </div>
+                <button
+                  onClick={() => setShowWalkthrough(false)}
+                  className="w-10 h-10 rounded-full border flex items-center justify-center hover:bg-gray-50 transition"
+                  aria-label="Close 3D walkthrough"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </div>
+              <div className="aspect-video bg-black">
+                <iframe
+                  src={viewerUrl}
+                  title={`${listing.title} Matterport walkthrough`}
+                  className="w-full h-full"
+                  allow="fullscreen; xr-spatial-tracking"
+                  allowFullScreen
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="p-8 md:p-12">
           <div className="flex flex-col md:flex-row justify-between items-start mb-8 gap-4">
