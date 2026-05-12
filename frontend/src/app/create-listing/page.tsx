@@ -22,6 +22,7 @@ export default function CreateListingPage() {
     property_type: "House",
     location_lat: 37.7749,
     location_lng: -122.4194,
+    matterport_url: "",
   });
 
   useEffect(() => {
@@ -114,6 +115,7 @@ export default function CreateListingPage() {
           location_lat: parseFloat(form.location_lat as any),
           location_lng: parseFloat(form.location_lng as any),
           image_urls: uploadedUrls,
+          matterport_url: form.matterport_url.trim() || null,
           seller_id: session.user.id
         }),
       });
@@ -215,6 +217,18 @@ export default function CreateListingPage() {
                 onChange={(lat, lng) => setForm({...form, location_lat: lat, location_lng: lng})} 
               />
               <p className="text-xs text-gray-500 mt-2 text-right">Selected: {form.location_lat.toFixed(4)}, {form.location_lng.toFixed(4)}</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Matterport Walkthrough URL</label>
+              <input
+                type="url"
+                className="w-full px-4 py-2 border rounded-lg focus:ring-primary focus:border-primary"
+                value={form.matterport_url}
+                onChange={e => setForm({ ...form, matterport_url: e.target.value })}
+                placeholder="https://my.matterport.com/show/?m=..."
+              />
+              <p className="text-xs text-gray-500 mt-1">Optional. Buyers will see a 3D button on the property photos.</p>
             </div>
 
             <div>
