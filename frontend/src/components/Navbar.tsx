@@ -4,12 +4,14 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
+import { useIsAdmin } from '@/lib/admin';
 
 export default function Navbar() {
     const [session, setSession] = useState<any>(null);
     const [notifications, setNotifications] = useState<any[]>([]);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
     const router = useRouter();
+    const { isAdmin } = useIsAdmin();
 
     useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
@@ -83,7 +85,7 @@ export default function Navbar() {
                     {!session && <Link href="/" className="hover:text-gray-300 transition">Home</Link>}
                     {session && <Link href="/search" className="hover:text-gray-300 transition">Map</Link>}
                     {session && <Link href="/negotiation" className="hover:text-gray-300 transition">Negotiation</Link>}
-                    {session && <Link href="/verification-agent" className="hover:text-gray-300 transition">Verify Sellers</Link>}
+                    {session && isAdmin && <Link href="/verification-agent" className="hover:text-gray-300 transition">Verify Sellers</Link>}
                     {session && <Link href="/messages" className="hover:text-gray-300 transition">Messages</Link>}
                     {session && <Link href="/settings" className="hover:text-gray-300 transition">Settings</Link>}
 
@@ -110,7 +112,7 @@ export default function Navbar() {
                     {!session && <Link href="/" onClick={() => setIsMobileMenuOpen(false)} className="text-xl font-medium text-white hover:text-gray-200">Home</Link>}
                     {session && <Link href="/search" onClick={() => setIsMobileMenuOpen(false)} className="text-xl font-medium text-white hover:text-gray-200">Map</Link>}
                     {session && <Link href="/negotiation" onClick={() => setIsMobileMenuOpen(false)} className="text-xl font-medium text-white hover:text-gray-200">Negotiation</Link>}
-                    {session && <Link href="/verification-agent" onClick={() => setIsMobileMenuOpen(false)} className="text-xl font-medium text-white hover:text-gray-200">Verify Sellers</Link>}
+                    {session && isAdmin && <Link href="/verification-agent" onClick={() => setIsMobileMenuOpen(false)} className="text-xl font-medium text-white hover:text-gray-200">Verify Sellers</Link>}
                     {session && <Link href="/messages" onClick={() => setIsMobileMenuOpen(false)} className="text-xl font-medium text-white hover:text-gray-200">Messages</Link>}
                     {session && <Link href="/settings" onClick={() => setIsMobileMenuOpen(false)} className="text-xl font-medium text-white hover:text-gray-200">Settings</Link>}
 

@@ -1,11 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { useIsAdmin } from "@/lib/admin";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function VerificationAgentPage() {
+  const router = useRouter();
+  const { isAdmin, loading: adminLoading } = useIsAdmin();
   const [pending, setPending] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
@@ -25,8 +29,23 @@ export default function VerificationAgentPage() {
   };
 
   useEffect(() => {
+    if (adminLoading) return;
+    if (!isAdmin) {
+      router.replace("/dashboard");
+      return;
+    }
     loadPending();
-  }, []);
+  }, [adminLoading, isAdmin, router]);
+
+  if (adminLoading || !isAdmin) {
+    return (
+      <ProtectedRoute>
+        <div className="flex h-[60vh] items-center justify-center text-gray-500">
+          Checking permissions…
+        </div>
+      </ProtectedRoute>
+    );
+  }
 
   const review = async (userId: string, status: "verified" | "rejected") => {
     try {
